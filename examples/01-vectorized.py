@@ -342,8 +342,8 @@ def main_autoregressive():
     # data_bytes = np.frombuffer(b"\x0F" * 1000, dtype=np.uint8)  # [0 0 0 0 1 1 1 1 0 0 ...]
     # data_bytes = np.frombuffer(b"U3\x0F" * 1000, dtype=np.uint8)
     # data_bytes = np.frombuffer(b"01" * 500, dtype=np.uint8)
-    # data_bytes = np.frombuffer(b"0123456789" * 100, dtype=np.uint8)
-    data_bytes = np.memmap("/home/i/d/enwik8", mode='r')
+    data_bytes = np.frombuffer(b"0123456789" * 100, dtype=np.uint8)
+    # data_bytes = np.memmap("/home/i/d/enwik8", mode='r')
     # data_bytes = np.memmap("/home/i/d/enwik9", mode='r')
 
     # Unpack into bits (Big Endian)

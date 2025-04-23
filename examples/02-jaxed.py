@@ -347,8 +347,8 @@ def main_autoregressive():
     # data_bytes = jnp.frombuffer(b"\x0F" * 1000, dtype=jnp.uint8)  # [0 0 0 0 1 1 1 1 0 0 ...]
     # data_bytes = jnp.frombuffer(b"U3\x0F" * 1000, dtype=jnp.uint8)
     # data_bytes = jnp.frombuffer(b"01" * 500, dtype=jnp.uint8)
-    # data_bytes = jnp.frombuffer(b"0123456789" * 100, dtype=jnp.uint8)
-    data_bytes = np.memmap("/home/i/d/enwik8", mode='r')
+    data_bytes = jnp.frombuffer(b"0123456789" * 100, dtype=jnp.uint8)
+    # data_bytes = np.memmap("/home/i/d/enwik8", mode='r')
     # data_bytes = np.memmap("/home/i/d/enwik9", mode='r')
 
     # Unpack into bits (Big Endian)
@@ -358,7 +358,6 @@ def main_autoregressive():
 
     # Training parameters
     context_length = 8 * 3
-    context_length = 40000
     batch_size = 1
     epochs = 5
     steps_per_epoch = 2
@@ -420,7 +419,7 @@ def main_autoregressive():
     print(f"Test Accuracy: {acc_tm * 100:.2f}%")
 
     # Decoding demonstration
-    n_decode_bits = 8 * 1
+    n_decode_bits = 8 * 8
     context_start = 0
     prompt = bits[context_start: context_start + context_length].copy()
     context = prompt.copy()
@@ -428,11 +427,9 @@ def main_autoregressive():
 
     for i in range(n_decode_bits):
         next_bit = evaluate(exclude, context)
-        # decoded_bits[i] = next_bit
-        decoded_bits = decoded_bits.at[i].set(next_bit)  # ✅ Fix
+        decoded_bits = decoded_bits.at[i].set(next_bit)
         context = jnp.roll(context, -1)
-        # context[-1] = next_bit
-        context = context.at[-1].set(next_bit)  # ✅ Also apply here
+        context = context.at[-1].set(next_bit)
 
     print(f"Prompt bits: {X_test[0].astype(int)}")
     print(f"Prompt bytes: {jnp.packbits(prompt).tobytes()}")

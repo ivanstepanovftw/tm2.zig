@@ -1,21 +1,23 @@
 # tm2.zig
-Binary Tsetlin machine implementation in Zig. Currently slow. Covered by tests.
+Binary Tsetlin machine implementation in Zig. Currently slow. Covered by tests. CPU only.
 
 ## Tsetlin machine 
-In short, Tsetlin machine is a type of machine learning model. It is energy efficient, lossless quantizable up to 1 bit, lossy compressible up to how many important clauses you want to keep, states can be interpretable (if your inputs are interpretable), it does not overfit on small dataset, it does not require your task to be differentiable... God knows what else can it do.
+In short, Tsetlin machine is a type of machine learning model. It is energy efficient, does not use floating point computations, bitwise, losslessly quantizable down to 1 bit per weight, lossy compressible up to how many important clauses you want to keep, weights are interpretable (if your inputs are interpretable), it does not overfit on small dataset, it does not require your task to be differentiable... God knows what else can it do.
 
 ## This work
-This implementation uses different probabilities in Type I(a), Type I(b) and Type II feedbacks, as in [Julia multi-class TM implementation](https://github.com/BooBSD/Tsetlin.jl).
+This implementation uses different probabilities in Type I(a), Type I(b) and Type II feedbacks, same as in [Julia multi-class TM implementation](https://github.com/BooBSD/Tsetlin.jl).
 
-As in Julia implementation, this implementation is multithreaded and uses lock-free Hogwild! approach to update states, with per-input parallelization.
+As in Julia implementation, this implementation is multithreaded and uses lock-free Hogwild! approach to update its weights, with per-sample parallelization.
 
-It differs from other implementations by using one array, thus being simple to understand, see i.e. [./examples/01-vectorized.py](./examples/01-vectorized.py) for a **less than 62 lines of code** reference implementation in NumPy (both training and inference). It also uses signed automata states, so state action threshold is hardcoded at 0. Unlike others implementation, this implementation does not have any floating point computations.
+It differs from other implementations by using one array, thus being simple to understand, see i.e. [./examples/01-vectorized.py](./examples/01-vectorized.py) for a **less than 62 lines of code** reference implementation in NumPy (both training and inference).
 
 Automata states in this binary TM represented as a 1D view of a 4D array of signed integers, where first dimension is clause polarity $C^{+}$ and $C^{-}$, second dimension is a clause index, third dimension is original or negated literal, and fourth dimension is a feature index.
 
 So, the shape is `(2, n_clauses, 2, n_features)`, where `n_clauses` is a number of clauses per polarity, and `n_features` is a number of features. For multi-class Tsetlin machine, shape would be `(n_classes, 2, n_clauses, 2, n_features)`, but it is out of scope for this repo.
 
-Same shapes for compiled models. Data type of compiled state is a binary mask of whether state action is include or exclude. Included states are non-negative integers (`states >= 0`), excluded states are negative integers (`states < 0`).
+Same shapes for compiled models. Data type of compiled state is a binary mask of whether state action is include or exclude. Included states are non-negative integers (`states >= 0`), excluded states are negative integers (`states < 0`). This work uses signed automata states, so state action threshold is hardcoded at 0.
+
+Unlike others implementation, this implementation does not use any floating point computations other than logging metrics.
 
 ## Feedback Mechanisms in Tsetlin Automata
 
@@ -33,23 +35,25 @@ An affected clause reinforces each of its Tsetlin Automata based on:
 3. The value of the literal $l_k$ assigned to the automaton.
 
 The two rules governing Type I feedback are as follows:
-- Type 1(a) (Recognize): **Include is rewarded** and **Exclude is penalized** with probability $\frac{s-1}{s}$ when $C_j(X) = 1$ and $l_k = 1$. This creates strong reinforcement, enabling the clause to remember and refine the pattern it recognizes in $X$.
-- Type 1(b) (Erase): **Include is penalized** and **Exclude is rewarded** with probability $\frac{1}{s}$ when $C_j(X) = 0$ or $l_k = 0$. This results in weak reinforcement, making infrequent patterns more common.
+- Type 1(a) (Recognize): **Include is rewarded** and **Exclude is penalized** with probability $\frac{s-1}{s}$ when $C_j(X) = 1$ and $l_k = 1$. 
+  > This creates strong reinforcement, enabling the clause to remember and refine the pattern it recognizes in $X$.
+- Type 1(b) (Erase): **Include is penalized** and **Exclude is rewarded** with probability $\frac{1}{s}$ when $C_j(X) = 0$ or $l_k = 0$.
+  > This results in weak reinforcement, making infrequent patterns more common.
 
 Here, $s$ is a hyperparameter that controls the frequency of patterns produced.
 
 #### Type I Feedback Table
 
-| State Action    | Clause $C_j(X)$ | Literal $l_k$ | P(Reward)       | P(Inaction)     | P(Penalty)      |
-|-----------------|-----------------|---------------|-----------------|-----------------|-----------------|
-| Include Literal | $1$             | $1$           | $\frac{s-1}{s}$ | $\frac{1}{s}$   | $0$             |
-|                 | $1$             | $0$           | NA              | NA              | NA              |
-|                 | $0$             | $1$           | $0$             | $\frac{s-1}{s}$ | $\frac{1}{s}$   |
-|                 | $0$             | $0$           | $0$             | $\frac{s-1}{s}$ | $\frac{1}{s}$   |
-| Exclude Literal | $1$             | $1$           | $0$             | $\frac{1}{s}$   | $\frac{s-1}{s}$ |
-|                 | $1$             | $0$           | $\frac{1}{s}$   | $\frac{s-1}{s}$ | $0$             |
-|                 | $0$             | $1$           | $\frac{1}{s}$   | $\frac{s-1}{s}$ | $0$             |
-|                 | $0$             | $0$           | $\frac{1}{s}$   | $\frac{s-1}{s}$ | $0$             |
+| State Action    | Clause $C_j(X)$ | Literal $l_k$ | P(Reward)       | P(Penalty)      |
+|-----------------|-----------------|---------------|-----------------|-----------------|
+| Include Literal | $1$             | $1$           | $\frac{s-1}{s}$ | $0$             |
+|                 | $1$             | $0$           | NA              | NA              |
+|                 | $0$             | $1$           | $0$             | $\frac{1}{s}$   |
+|                 | $0$             | $0$           | $0$             | $\frac{1}{s}$   |
+| Exclude Literal | $1$             | $1$           | $0$             | $\frac{s-1}{s}$ |
+|                 | $1$             | $0$           | $\frac{1}{s}$   | $0$             |
+|                 | $0$             | $1$           | $\frac{1}{s}$   | $0$             |
+|                 | $0$             | $0$           | $\frac{1}{s}$   | $0$             |
 
 ### Type II Feedback
 
@@ -64,23 +68,28 @@ An affected clause reinforces each of its Tsetlin Automata based on:
 2. The action of the targeted Tsetlin Automaton (Include or Exclude),
 3. The value of the literal $l_k$ assigned to the automaton.
 
-Type II feedback penalizes **Exclude** when $C_j(X) = 1$ and $l_k = 0$. This feedback is strong and produces candidate literals for discriminating between $y = 0$ and $y = 1$.
+Type II feedback penalizes **Exclude** when $C_j(X) = 1$ and $l_k = 0$.
+> This feedback is strong and produces candidate literals for discriminating between $y = 0$ and $y = 1$.
 
-### Type II Feedback Table
+#### Type II Feedback Table
 
-| State Action    | Clause $C_j(X)$ | Literal $l_k$ | P(Reward) | P(Inaction) | P(Penalty) |
-|-----------------|-----------------|---------------|-----------|-------------|------------|
-| Include Literal | $1$             | $1$           | $0$       | $1.0$       | $0$        |
-|                 | $1$             | $0$           | NA        | NA          | NA         |
-|                 | $0$             | $1$           | $0$       | $1.0$       | $0$        |
-|                 | $0$             | $0$           | $0$       | $1.0$       | $0$        |
-| Exclude Literal | $1$             | $1$           | $0$       | $1.0$       | $0$        |
-|                 | $1$             | $0$           | $0$       | $0$         | $1.0$      |
-|                 | $0$             | $1$           | $0$       | $1.0$       | $0$        |
-|                 | $0$             | $0$           | $0$       | $1.0$       | $0$        |
+| State Action    | Clause $C_j(X)$ | Literal $l_k$ | P(Reward) | P(Penalty) |
+|-----------------|-----------------|---------------|-----------|------------|
+| Include Literal | $1$             | $1$           | $0$       | $0$        |
+|                 | $1$             | $0$           | NA        | NA         |
+|                 | $0$             | $1$           | $0$       | $0$        |
+|                 | $0$             | $0$           | $0$       | $0$        |
+| Exclude Literal | $1$             | $1$           | $0$       | $0$        |
+|                 | $1$             | $0$           | $0$       | $1.0$      |
+|                 | $0$             | $1$           | $0$       | $0$        |
+|                 | $0$             | $0$           | $0$       | $0$        |
 
 ## Usage
-Reproduce IMDB classification 85%+ accuracy.
+### IMDB classification
+I have achieved 86%+ accuracy (no parameter tuning was performed) at 2.44 MiB compiled state with the following parameters:
+```
+S: i8, t: 8, r: 11990383208106557440 (0.65), n_features: 40000, n_clauses: 128, state size: 20480000 (19.5MiB)
+```
 1. Obtain IMDBTrainingData.txt and IMDBTestData.txt using `python3 produce_dataset.py`
 2. Convert them to IMDBTrainingData.bin and IMDBTestData.bin using `python3 tobin.py`
 3. Run the example:
