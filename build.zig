@@ -4,6 +4,9 @@ const std = @import("std");
 // declaratively construct a build graph that will be executed by an external
 // runner.
 pub fn build(b: *std.Build) void {
+    const single_threaded = false;
+    // const single_threaded = true;
+
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
@@ -26,7 +29,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
-        // .single_threaded = true,
+        .single_threaded = single_threaded,
     });
 
     // We will also create a module for our other entry point, 'main.zig'.
@@ -39,6 +42,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = true,
+        .single_threaded = single_threaded,
     });
 
     // Modules can depend on one another using the `std.Build.Module.addImport` function.

@@ -1,7 +1,7 @@
 """
 How to test:
 ```shell
-pytest -v 00-naive.py -p no:warnings
+pytest -v examples/01-vectorized.py -p no:warnings
 ```
 How to run:
 ```shell
@@ -96,19 +96,19 @@ class VectorizedBinaryTsetlinMachineTrainer:
         if rng is not None:
             # The "resource allocation" is basically:
             # p_clause_update = np.where(target, -1, 1) * votes.clip(-t, t) / (2 * t) + 0.5  # naive and simple
-            # p_clause_update = (t - np.where(target, votes, -votes).clip(-t, t)) / (2 * t)  # numpy optimized
-            ## p_clause_update = (np.where(target, votes, -votes).clip(-t, t) + t) * (scale // (2 * t))  # for integer random, also don't forget to scale constants like `1` in `(1 - r)` below.
-            # p_clause_update_ = p_clause_update[..., None, None, None, None]  # (batch..., 1, 1, 1, 1), float
-            # rand_mask_1a = rng.random(batch_shape + self.state.shape[:2] + (1,) * 2) <= p_clause_update_  # (batch..., 2, clause_dim, 1, 1), bool
-            # rand_mask_1b = rng.random(batch_shape + self.state.shape) <= p_clause_update_ * (1 - r)     # (batch..., 2, clause_dim, 2, in_dim), bool
-            # rand_mask_2 = rng.random(batch_shape + self.state.shape) <= p_clause_update_ * r            # (batch..., 2, clause_dim, 2, in_dim), bool
+            p_clause_update = (t - np.where(target, votes, -votes).clip(-t, t)) / (2 * t)  # numpy optimized
+            # p_clause_update = (np.where(target, votes, -votes).clip(-t, t) + t) * (scale // (2 * t))  # for integer random, also don't forget to scale constants like `1` in `(1 - r)` below.
+            p_clause_update_ = p_clause_update[..., None, None, None, None]  # (batch..., 1, 1, 1, 1), float
+            rand_mask_1a = rng.random(batch_shape + self.state.shape[:2] + (1,) * 2) <= p_clause_update_  # (batch..., 2, clause_dim, 1, 1), bool
+            rand_mask_1b = rng.random(batch_shape + self.state.shape) <= p_clause_update_ * (1 - r)     # (batch..., 2, clause_dim, 2, in_dim), bool
+            rand_mask_2 = rng.random(batch_shape + self.state.shape) <= p_clause_update_ * r            # (batch..., 2, clause_dim, 2, in_dim), bool
 
             # Dumber version: per sample skip instead of gradually per clause
-            too_confident = (target & (votes > t)) | (~target & (votes < -t))  # shape: (batch..., 2)
-            too_confident = too_confident[..., None, None, None]  # (batch..., 2, 1, 1, 1), bool
-            rand_mask_1a = ~too_confident
-            rand_mask_1b = (rng.random(batch_shape + self.state.shape) > r) & ~too_confident
-            rand_mask_2 = (rng.random(batch_shape + self.state.shape) <= r) & ~too_confident
+            # too_confident = (target & (votes > t)) | (~target & (votes < -t))  # shape: (batch..., 2)
+            # too_confident = too_confident[..., None, None, None]  # (batch..., 2, 1, 1, 1), bool
+            # rand_mask_1a = ~too_confident
+            # rand_mask_1b = (rng.random(batch_shape + self.state.shape) > r) & ~too_confident
+            # rand_mask_2 = (rng.random(batch_shape + self.state.shape) <= r) & ~too_confident
 
         type_1_feedback = np.stack((target, ~target), axis=-1)[..., None, None, None]  # (batch..., 2, 1, 1, 1), bool
         clauses_ = clauses[..., None, None]  # (batch..., 2, clause_dim, 1, 1), bool
