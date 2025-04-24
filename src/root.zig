@@ -106,14 +106,14 @@ pub const Config = struct {
 };
 
 
-/// 0.0420s
+/// 0.042881s
 pub fn getIncludesOnePass(comptime S: type, states: []S, includes: *BitVector) void {
     std.debug.assert(states.len == includes.len);
     for (0..states.len) |i_state|
         includes.setValue(i_state, states[i_state] >= 0);
 }
 
-/// 0.0060s
+/// 0.009739s
 pub fn getIncludesTwoPass(comptime S: type, states: []S, includes: *BitVector) void {
     std.debug.assert(states.len == includes.len);
     @memset(includes.bytes, 0);
@@ -122,20 +122,44 @@ pub fn getIncludesTwoPass(comptime S: type, states: []S, includes: *BitVector) v
             includes.setValueTrue(i_state);
 }
 
-/// 0.0020s
+/// 0.001773s
 pub fn getIncludesVector8(comptime S: type, states: []S, includes: *BitVector) void {
     std.debug.assert(states.len == includes.len);
     var i: usize = 0;
-    const l = 8;
-    while (i < states.len) : (i += l) {
-        const threshold: @Vector(l, S) = @splat(@as(S, 0));
-        const states_vec: @Vector(l, S) = @bitCast(states[i .. i + l][0..l].*);
-        const includes_vec: @Vector(l, u1) = @bitCast(states_vec >= threshold);
+    while (i < states.len) : (i += 8) {
+        const threshold: @Vector(8, S) = @splat(@as(S, 0));
+        const states_vec: @Vector(8, S) = @bitCast(states[i .. i + 8][0..8].*);
+        const includes_vec: @Vector(8, u1) = @bitCast(states_vec >= threshold);
         includes.bytes[i / 8] = @bitCast(includes_vec);
     }
 }
 
-pub const getIncludes = getIncludesVector8;
+/// 0.001386s
+pub fn getIncludesVector(comptime S: type, states: []S, includes: *BitVector) void {
+    std.debug.assert(states.len == includes.len);
+    var i: usize = 0;
+    const l = std.simd.suggestVectorLength(S) orelse 1;
+    while (i < states.len) : (i += l) {
+        const threshold: @Vector(l, S) = @splat(@as(S, 0));
+        const states_vec: @Vector(l, S) = @bitCast(states[i .. i + l][0..l].*);
+        const includes_vec: @Vector(l, u1) = @bitCast(states_vec >= threshold);
+        // If l is byte-aligned, pack 8 lanes into one u8 and write L/8 bytes at once
+        if (l >= 8 and (l % 8) == 0) {
+            const bytes_vec: @Vector(l/8, u8) = @bitCast(includes_vec);
+            const dest_vec_ptr: *@Vector(l/8, u8) = @alignCast(@ptrCast(&includes.bytes[i / 8]));
+            dest_vec_ptr.* = bytes_vec;
+        } else {
+            // Otherwise fall back lane‐by‐lane
+            var j: usize = 0;
+            while (j < l) : (j += 1) {
+                // lanes of u1 are 0 or 1, so != 0 gives true/false
+                includes.setValue(i + j, includes_vec[j] != 0);
+            }
+        }
+    }
+}
+
+pub const getIncludes = getIncludesVector;
 
 pub fn getClauseU1(
     config: Config,
@@ -262,6 +286,10 @@ test "fuzz getIncludes() and evaluate()" {
     defer includesVector8.deinit(allocator);
     @memset(includesVector8.bytes, 0);
 
+    var includesVector = try BitVector.init(allocator, config.stateSize());
+    defer includesVector.deinit(allocator);
+    @memset(includesVector.bytes, 0);
+
     var features = try BitVector.init(allocator, n_features);
     defer features.deinit(allocator);
     @memset(features.bytes, 0);
@@ -276,6 +304,9 @@ test "fuzz getIncludes() and evaluate()" {
 
         getIncludesVector8(S, states_buf, &includesVector8);
         try testing.expectEqualSlices(u8, includesOnePass.bytes, includesVector8.bytes);
+
+        getIncludesVector(S, states_buf, &includesVector);
+        try testing.expectEqualSlices(u8, includesOnePass.bytes, includesVector.bytes);
 
         _ = .{config, V, features, includesOnePass, includesTwoPass, includesVector8};
         // const v1 = evaluateCompiledU1(config, V, includesOnePass, features);
