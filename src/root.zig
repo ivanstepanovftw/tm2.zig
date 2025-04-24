@@ -258,7 +258,88 @@ test evaluateIncludesU1 {
     }
 }
 
-pub const evaluateIncludes = evaluateIncludesU1;
+pub fn evaluateIncludesVector(
+    config: Config,
+    comptime V: type,
+    includes: BitVector,
+    features: BitVector,
+) V {
+    // only signed V supported
+    if (@typeInfo(V).int.signedness != .signed) unreachable;
+    var votes: V = 0;
+
+    // how many u1 lanes we can do in parallel?
+    const l = std.simd.suggestVectorLength(u1) orelse 1;
+    const feat_len = config.n_features;
+
+    // only if our lane count is a multiple of 8 can we bit‐cast bytes ↔ masks
+    const byte_aligned = (l >= 8 and (l % 8) == 0);
+    const chunk_bytes = l / 8;
+
+    for (0..2) |i_polarity| {
+        for (0..config.n_clauses) |i_clause| {
+            // accumulator for this clause
+            var c: u1 = 1;
+
+            // where the “positive” vs “negated” slices begin in the includes BitVector
+            const base_pos = config.stateIndex(i_polarity, i_clause, 0, 0);
+            const base_neg = config.stateIndex(i_polarity, i_clause, 1, 0);
+
+            var f_off: usize = 0;
+
+            // —— SIMD chunks ——
+            while (c != 0 and f_off + l <= feat_len) : (f_off += l) {
+                if (byte_aligned) {
+                    // slice out chunk_bytes, then [0..chunk_bytes] makes it an array
+                    const feat_slice = features.bytes[f_off/8 .. f_off/8 + chunk_bytes];
+                    const feats_vec: @Vector(l, u1) = @bitCast(feat_slice[0..chunk_bytes].*);
+                    const feats_neg = ~feats_vec;
+
+                    const pos_slice = includes.bytes[(base_pos + f_off)/8 .. (base_pos + f_off)/8 + chunk_bytes];
+                    const neg_slice = includes.bytes[(base_neg + f_off)/8 .. (base_neg + f_off)/8 + chunk_bytes];
+                    const inc_pos: @Vector(l, u1) = @bitCast(pos_slice[0..chunk_bytes].*);
+                    const inc_neg: @Vector(l, u1) = @bitCast(neg_slice[0..chunk_bytes].*);
+
+                    const both = (~inc_pos | feats_vec) & (~inc_neg | feats_neg);
+                    const chunk_c: u1 = @reduce(.And, both);
+                    c &= chunk_c;
+                } else {
+                    // fallback per-lane when not byte-aligned
+                    var j: usize = 0;
+                    while (j < l) : (j += 1) {
+                        // const inc_bit = includes.getValue(base_pos + f_off + j) == false or
+                        //                 includes.getValue(base_neg + f_off + j) == true;
+                        const feat_bit = features.getValue(f_off + j);
+                        const succ_p: u1 = if (!includes.getValue(base_pos + f_off + j) or feat_bit) 1 else 0;
+                        const succ_n: u1 = if (!includes.getValue(base_neg + f_off + j) or (!feat_bit)) 1 else 0;
+                        c &= (succ_p & succ_n);
+                    }
+                }
+                if (c == 0) break;
+            }
+
+            // —— scalar tail ——
+            while (c != 0 and f_off < feat_len) : (f_off += 1) {
+                const inc_p = includes.getValue(base_pos + f_off);
+                const inc_n = includes.getValue(base_neg + f_off);
+                const f = features.getValue(f_off);
+
+                // (~inc_p || f)  &&  (~inc_n || !f)
+                const succ_p: u1 = if (!inc_p or f) 1 else 0;
+                const succ_n: u1 = if (!inc_n or (!f)) 1 else 0;
+                c &= (succ_p & succ_n);
+            }
+
+            // if this clause survived, cast to +1 or –1 vote
+            if (i_polarity == 0) votes += c else votes -= c;
+        }
+    }
+
+    return votes;
+}
+
+// pub const evaluateIncludes = evaluateIncludesU1;
+pub const evaluateIncludes = evaluateIncludesVector;
 
 test "fuzz getIncludes() and evaluate()" {
     const allocator = std.testing.allocator;
