@@ -48,25 +48,25 @@ def init_state(n_features: int, n_clauses: int, dtype=jnp.int8):
     # Automata states are stored in a 4D array:
     # Shape: (2, clause_dim, 2, in_dim)
     #  - Axis 0: polarity (0: votes for y = 1, 1: votes for y = 0)
-    #  - Axis 1: clause index per polarity
-    #  - Axis 2: literal type (0: original, 1: negated)
-    #  - Axis 3: input feature (in_dim)
+    #  - Axis 1: literal type (0: features, 1: ~features)
+    #  - Axis 2: input feature (in_dim)
+    #  - Axis 3: clause index per polarity
     # Negative state value is a subject to exclude literals from the clause firing.
     # Initialize near state action threshold as _empty_ clauses.
-    return -jnp.ones((2, n_clauses, 2, n_features), dtype=dtype)
+    return -jnp.ones((2, 2, n_features, n_clauses), dtype=dtype)
 
 
 @jax.jit
 def compile_exclude(
-        state: jnp.ndarray,  # (2, clause_dim, 2, in_dim), signed integer
+        state: jnp.ndarray,  # (2, 2, in_dim, clause_dim), signed integer
 ) -> jnp.ndarray:
-    exclude = state < 0  # (2, clause_dim, 2, in_dim), bool
+    exclude = state < 0  # (2, 2, in_dim, clause_dim), bool
     return exclude
 
 
 @jax.jit
 def evaluate_clauses(
-        exclude: jnp.ndarray,  # (2, clause_dim, 2, in_dim), bool
+        exclude: jnp.ndarray,  # (2, 2, in_dim, clause_dim), bool
         features: jnp.ndarray,  # (batch..., in_dim), bool
 ) -> jnp.ndarray:
     """
@@ -76,15 +76,15 @@ def evaluate_clauses(
     # As we are focusing on batched input, we cannot simply use `clauses = all(literals[include])`,
     # clauses = all(literals[include]) = all(exclude | literals)
     literals = jnp.stack((features, ~features), -2)  # (batch..., 2, in_dim), bool
-    literals_ = literals[..., None, None, :, :]  # (batch..., 1, 1, 2, in_dim), bool
-    success = exclude | literals_  # (batch..., 2, clause_dim, 2, in_dim), bool
-    clauses = success.all((-2, -1))  # (batch..., 2, clause_dim), bool
+    literals_ = literals[..., None, :, :, None]  # (batch..., 2, in_dim, 1), bool
+    success = exclude | literals_  # (batch..., 2, 2, in_dim, clause_dim), bool
+    clauses = success.all((-3, -2))  # (batch..., 2, clause_dim), bool
     return clauses
 
 
 @jax.jit
 def evaluate(
-        exclude: jnp.ndarray,  # (2, clause_dim, 2, in_dim), bool
+        exclude: jnp.ndarray,  # (2, 2, in_dim, clause_dim), bool
         features: jnp.ndarray,  # (batch..., in_dim), bool
 ) -> jnp.ndarray:
     """
@@ -94,9 +94,9 @@ def evaluate(
     # As we are focusing on batched input, we cannot simply use `clauses = all(literals[include])`,
     # clauses = all(literals[include]) = all(exclude | literals) = !any(include & ~literals)
     literals = jnp.stack((features, ~features), -2)  # (batch..., 2, in_dim), bool
-    literals_ = literals[..., None, None, :, :]  # (batch..., 1, 1, 2, in_dim), bool
-    success = exclude | literals_    # (batch..., 2, clause_dim, 2, in_dim), bool
-    clauses = success.all((-2, -1))  # (batch..., 2, clause_dim), bool
+    literals_ = literals[..., None, :, :, None]  # (batch..., 2, in_dim, 1), bool
+    success = exclude | literals_  # (batch..., 2, 2, in_dim, clause_dim), bool
+    clauses = success.all((-3, -2))  # (batch..., 2, clause_dim), bool
 
     pos_votes = clauses[..., :1, :].sum((-2, -1))  # (batch...,), int64
     neg_votes = clauses[..., 1:, :].sum((-2, -1))  # (batch...,), int64
@@ -123,11 +123,11 @@ def fit(
     """
     # As we are focusing on batched input, we cannot simply use `clauses = all(literals[include])`,
     # clauses = all(literals[include]) = all(exclude | literals) = !any(include & ~literals)
-    exclude = state < 0  # (2, clause_dim, 2, in_dim), bool
+    exclude = state < 0  # (2, 2, in_dim, clause_dim), bool
     literals = jnp.stack((features, ~features), -2)  # (batch..., 2, in_dim), bool
-    literals_ = literals[..., None, None, :, :]  # (batch..., 1, 1, 2, in_dim), bool
-    success = exclude | literals_    # (batch..., 2, clause_dim, 2, in_dim), bool
-    clauses = success.all((-2, -1))  # (batch..., 2, clause_dim), bool
+    literals_ = literals[..., None, :, :, None]  # (batch..., 1, 2, in_dim, 1), bool
+    success = exclude | literals_  # (batch..., 2, 2, in_dim, clause_dim), bool
+    clauses = success.all((-3, -2))  # (batch..., 2, clause_dim), bool
 
     pos_votes = clauses[..., :1, :].sum((-2, -1))  # (batch...,), int64
     neg_votes = clauses[..., 1:, :].sum((-2, -1))  # (batch...,), int64
@@ -139,27 +139,28 @@ def fit(
     assert batch_shape == target.shape, "target shape must be equal to batch_shape"
 
     type_1_feedback = jnp.stack((target, ~target), axis=-1)[..., None, None, None]  # (batch..., 2, 1, 1, 1), bool
-    clauses_ = clauses[..., None, None]  # (batch..., 2, 1, 1), bool
+    clauses_ = clauses[..., None, None, :]  # (batch..., 2, 1, 1, clause_dim), bool
 
     rand_mask_1a = rand_mask_1b = rand_mask_2 = jnp.array(True)
     if rng_key is not None:
         # The "resource allocation" is basically:
         # p_clause_update = np.where(target, 1, -1) * votes.clip(-t, t) / (2 * t) + 0.5
         p_clause_update = (t - jnp.where(target, votes, -votes).clip(-t, t)) / (2 * t)  # (batch...,), float
+        # p_clause_update = (jnp.where(target, votes, -votes).clip(-t, t) + t) * (scale // (2 * t))  # for integer random, also don't forget to scale constants like `1` in `(1 - r)` below.
         p_clause_update_ = p_clause_update[..., None, None, None, None]  # (batch..., 1, 1, 1, 1), float
 
         key_1a, key_1b, key_2 = jax.random.split(rng_key, 3)
-        rand_mask_1a = jax.random.uniform(key_1a, batch_shape + state.shape[:2] + (1,) * 2) <= p_clause_update_  # (batch..., 2, clause_dim, 1, 1), bool
-        rand_mask_1b = jax.random.uniform(key_1b, batch_shape + state.shape) <= p_clause_update_ * (1 - r)  # (batch..., 2, clause_dim, 2, in_dim), bool
-        rand_mask_2 = jax.random.uniform(key_2, batch_shape + state.shape) <= p_clause_update_ * r  # (batch..., 2, clause_dim, 2, in_dim), bool
+        rand_mask_1a = jax.random.uniform(key_1a, (*batch_shape, 2, 1, 1, state.shape[-1])) <= p_clause_update_  # (batch..., 2, 1, 1, clause_dim), bool
+        rand_mask_1b = jax.random.uniform(key_1b, batch_shape + state.shape) <= p_clause_update_ * (1 - r)  # (batch..., 2, 2, in_dim, clause_dim), bool
+        rand_mask_2 = jax.random.uniform(key_2, batch_shape + state.shape) <= p_clause_update_ * r  # (batch..., 2, 2, in_dim, clause_dim), bool
 
     type1a = type_1_feedback & clauses_ & literals_ & rand_mask_1a
     type1b = type_1_feedback & ~(clauses_ & literals_) & rand_mask_1b
     type2 = ~type_1_feedback & clauses_ & ~literals_ & exclude & rand_mask_2
 
-    feedback_1a = type1a.sum(batch_axes, state.dtype)  # (2, clause_dim, 2, in_dim), state.dtype
-    feedback_1b = -type1b.sum(batch_axes, state.dtype)  # (2, clause_dim, 2, in_dim), state.dtype
-    feedback_2 = type2.sum(batch_axes, state.dtype)  # (2, clause_dim, 2, in_dim), state.dtype
+    feedback_1a = type1a.sum(batch_axes, state.dtype)  # (2, 2, in_dim, clause_dim), state.dtype
+    feedback_1b = -type1b.sum(batch_axes, state.dtype)  # (2, 2, in_dim, clause_dim), state.dtype
+    feedback_2 = type2.sum(batch_axes, state.dtype)  # (2, 2, in_dim, clause_dim), state.dtype
 
     if use_1a: state = add_sat(state, feedback_1a)
     if use_1b: state = add_sat(state, feedback_1b)
@@ -182,8 +183,8 @@ def test_forward():
          [[1], [-1]],    # [1, 0]      | [0, 1]     | all([1])    = 1        | all([1, 1]) = 1
          [[-1], [1]],    # [0, 1]      | [1, 0]     | all([0])    = 0        | all([1, 0]) = 0
          [[-1], [-1]]],  # [0, 0]      | [1, 1]     | all([])     = 1        | all([1, 1]) = 1
-    ], dtype=jnp.int8)
-    assert state.shape == (2, config["n_clauses"], 2, config["n_features"])
+    ], dtype=jnp.int8).transpose(0, 2, 3, 1)
+    assert state.shape == (2, 2, config["n_features"], config["n_clauses"])
     exclude = compile_exclude(state)  # (2, clause_dim, 2, in_dim), bool
     clauses = evaluate_clauses(exclude, features)
     target = jnp.array([
@@ -212,8 +213,8 @@ def test_forward_xor():
          [[-1, 0], [0, -1]]],  # 1 | 1 | [[0, 1], [1, 0]] | [[1, 0], [0, 1]] | [[1, 0], [0, 0]]        | u(0 - 1) = u(-1) = 0
         [[[0, 0], [-1, -1]],   # 0 | 0 | [[1, 1], [0, 0]] | [[0, 0], [1, 1]] | [[1, 0], [0, 0]]        | u(0 - 1) = u(-1) = 0
          [[-1, -1], [0, 0]]],  # 0 | 1 | [[0, 0], [1, 1]] | [[1, 1], [0, 0]] | [[0, 0], [1, 0]]        | u(1 - 0) = u(1) = 1
-    ], dtype=jnp.int8)
-    assert state.shape == (2, config["n_clauses"], 2, config["n_features"])
+    ], dtype=jnp.int8).transpose(0, 2, 3, 1)
+    assert state.shape == (2, 2, config["n_features"], config["n_clauses"])
     exclude = compile_exclude(state)  # (2, clause_dim, 2, in_dim), bool
     predictions = evaluate(exclude, features)
     target = jnp.array([False, True, True, False])
@@ -236,8 +237,8 @@ def test_fit_1a():
          [[1], [-1]],    # 0 | 1 |                 0 | 1 & [1, 0] = [1, 0] | [0, 0]
          [[-1], [1]],    # 0 | 2 |                 0 | 0 & [1, 0] = [0, 0] | [0, 0]
          [[-1], [-1]]],  # 0 | 3 |                 0 | 1 & [1, 0] = [1, 0] | [0, 0]
-    ], dtype=jnp.int8)
-    assert state.shape == (2, config["n_clauses"], 2, config["n_features"])
+    ], dtype=jnp.int8).transpose(0, 2, 3, 1)
+    assert state.shape == (2, 2, config["n_features"], config["n_clauses"])
     state, predictions = fit(state, features, target, rng_key=None, use_1a=True, use_1b=False, use_2=False)
     target_state = jnp.array([
         [[[1], [1]],     # change: [0, 0]
@@ -248,7 +249,7 @@ def test_fit_1a():
          [[1], [-1]],    # change: [0, 0]
          [[-1], [1]],    # change: [0, 0]
          [[-1], [-1]]],  # change: [0, 0]
-    ])
+    ]).transpose(0, 2, 3, 1)
     assert jnp.array_equal(state, target_state)
 
 
@@ -268,8 +269,8 @@ def test_fit_1b():
          [[1], [-1]],    # 0 | 1 |                 0 | ![1, 0] = [0, 1]      | [0, 0]
          [[-1], [1]],    # 0 | 2 |                 0 | ![0, 0] = [1, 1]      | [0, 0]
          [[-1], [-1]]],  # 0 | 3 |                 0 | ![1, 0] = [0, 1]      | [0, 0]
-    ], dtype=jnp.int8)
-    assert state.shape == (2, config["n_clauses"], 2, config["n_features"])
+    ], dtype=jnp.int8).transpose(0, 2, 3, 1)
+    assert state.shape == (2, 2, config["n_features"], config["n_clauses"])
     state, predictions = fit(state, features, target, rng_key=None, use_1a=False, use_1b=True, use_2=False)
     target_state = jnp.array([
         [[[0], [0]],     # change: [-1, -1]
@@ -280,7 +281,7 @@ def test_fit_1b():
          [[1], [-1]],    # change: [0, 0]
          [[-1], [1]],    # change: [0, 0]
          [[-1], [-1]]],  # change: [0, 0]
-    ])
+    ]).transpose(0, 2, 3, 1)
     assert jnp.array_equal(state, target_state)
 
 
@@ -300,8 +301,8 @@ def test_fit_2():
          [[1], [-1]],    # 0 | 1 |                 1 | 1 & [0, 1] = [0, 1] | [0, 1]
          [[-1], [1]],    # 0 | 2 |                 1 | 0 & [0, 1] = [0, 0] | [0, 0]
          [[-1], [-1]]],  # 0 | 3 |                 1 | 1 & [0, 1] = [0, 1] | [0, 1]
-    ], dtype=jnp.int8)
-    assert state.shape == (2, config["n_clauses"], 2, config["n_features"])
+    ], dtype=jnp.int8).transpose(0, 2, 3, 1)
+    assert state.shape == (2, 2, config["n_features"], config["n_clauses"])
     state, predictions = fit(state, features, target, rng_key=None, use_1a=False, use_1b=False, use_2=True)
     target_state = jnp.array([
         [[[1], [1]],     # change: [0, 0]
@@ -312,7 +313,7 @@ def test_fit_2():
          [[1], [0]],     # change: [0, 1]
          [[-1], [1]],    # change: [0, 0]
          [[-1], [0]]],   # change: [0, 1]
-    ])
+    ]).transpose(0, 2, 3, 1)
     assert jnp.array_equal(state, target_state)
 
 
@@ -360,7 +361,7 @@ def main_autoregressive():
     context_length = 8 * 3
     batch_size = 1
     epochs = 5
-    steps_per_epoch = 2
+    steps_per_epoch = 1000
     rng_key = jax.random.PRNGKey(0)
 
     config = dict(n_features=context_length, n_clauses=128 * 8)

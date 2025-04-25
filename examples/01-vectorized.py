@@ -45,14 +45,14 @@ class VectorizedBinaryTsetlinMachineTrainer:
         assert np.iinfo(dtype).kind == 'i', "dtype must be a signed integer type"
 
         # Automata states are stored in a 4D array:
-        # Shape: (2, clause_dim, 2, in_dim)
+        # Shape: (2, 2, in_dim, clause_dim)
         #  - Axis 0: polarity (0: votes for y = 1, 1: votes for y = 0)
-        #  - Axis 1: clause index per polarity
-        #  - Axis 2: literal type (0: original, 1: negated)
-        #  - Axis 3: input feature (in_dim)
+        #  - Axis 1: literal type (0: features, 1: ~features)
+        #  - Axis 2: input feature (in_dim)
+        #  - Axis 3: clause index per polarity
         # Negative state value is a subject to exclude literals from the clause firing.
         # Initialize near state action threshold as _empty_ clauses.
-        self.state = -np.ones((2, n_clauses, 2, n_features), dtype=dtype)
+        self.state = -np.ones((2, 2, n_features, n_clauses), dtype=dtype)
 
     def __call__(
             self,
@@ -74,11 +74,11 @@ class VectorizedBinaryTsetlinMachineTrainer:
 
         # As we are focusing on batched input, we cannot simply use `clauses = all(literals[include])`,
         # clauses = all(literals[include]) = all(exclude | literals) = !any(include & ~literals)
-        exclude = self.state < 0  # (2, clause_dim, 2, in_dim), bool
+        exclude = self.state < 0  # (2, 2, in_dim, clause_dim), bool
         literals = np.stack((features, ~features), -2)  # (batch..., 2, in_dim), bool
-        literals_ = literals[..., None, None, :, :]  # (batch..., 1, 1, 2, in_dim), bool
-        success = exclude | literals_  # (batch..., 2, clause_dim, 2, in_dim), bool
-        result["clauses"] = clauses = success.all((-2, -1))  # (batch..., 2, clause_dim), bool
+        literals_ = literals[..., None, :, :, None]  # (batch..., 1, 2, in_dim, 1), bool
+        success = exclude | literals_  # (batch..., 2, 2, in_dim, clause_dim), bool
+        result["clauses"] = clauses = success.all((-3, -2))  # (batch..., 2, clause_dim), bool
 
         pos_votes = clauses[..., :1, :].sum((-2, -1))  # (batch...,), int64
         neg_votes = clauses[..., 1:, :].sum((-2, -1))  # (batch...,), int64
@@ -90,36 +90,36 @@ class VectorizedBinaryTsetlinMachineTrainer:
 
         batch_shape = features.shape[:-1]
         batch_axes = tuple(range(len(batch_shape)))
-        assert batch_shape == target.shape, "target shape must be equal to batch_shape"
+        assert batch_shape == target.shape, f"target shape must be equal to {batch_shape=} but got {target.shape=}"
 
         rand_mask_1a = rand_mask_1b = rand_mask_2 = np.array(True)
         if rng is not None:
             # The "resource allocation" is basically:
-            # p_clause_update = np.where(target, -1, 1) * votes.clip(-t, t) / (2 * t) + 0.5  # naive and simple
-            p_clause_update = (t - np.where(target, votes, -votes).clip(-t, t)) / (2 * t)  # numpy optimized
+            # p_clause_update = np.where(target, -1, 1) * votes.clip(-t, t) / (2 * t) + 0.5  # (batch...,), float
+            p_clause_update = (t - np.where(target, votes, -votes).clip(-t, t)) / (2 * t)  # (batch...,), float
             # p_clause_update = (np.where(target, votes, -votes).clip(-t, t) + t) * (scale // (2 * t))  # for integer random, also don't forget to scale constants like `1` in `(1 - r)` below.
             p_clause_update_ = p_clause_update[..., None, None, None, None]  # (batch..., 1, 1, 1, 1), float
-            rand_mask_1a = rng.random(batch_shape + self.state.shape[:2] + (1,) * 2) <= p_clause_update_  # (batch..., 2, clause_dim, 1, 1), bool
-            rand_mask_1b = rng.random(batch_shape + self.state.shape) <= p_clause_update_ * (1 - r)     # (batch..., 2, clause_dim, 2, in_dim), bool
-            rand_mask_2 = rng.random(batch_shape + self.state.shape) <= p_clause_update_ * r            # (batch..., 2, clause_dim, 2, in_dim), bool
+            rand_mask_1a = rng.random((*batch_shape, 2, 1, 1, self.state.shape[-1])) <= p_clause_update_  # (batch..., 2, 1, 1, clause_dim), bool
+            rand_mask_1b = rng.random(batch_shape + self.state.shape) <= p_clause_update_ * (1 - r)       # (batch..., 2, 2, in_dim, clause_dim), bool
+            rand_mask_2 = rng.random(batch_shape + self.state.shape) <= p_clause_update_ * r              # (batch..., 2, 2, in_dim, clause_dim), bool
 
             # Dumber version: per sample skip instead of gradually per clause
-            # too_confident = (target & (votes > t)) | (~target & (votes < -t))  # shape: (batch..., 2)
+            # too_confident = (target & (votes >= t)) | (~target & (votes < -t))  # (batch..., 2)
             # too_confident = too_confident[..., None, None, None]  # (batch..., 2, 1, 1, 1), bool
             # rand_mask_1a = ~too_confident
             # rand_mask_1b = (rng.random(batch_shape + self.state.shape) > r) & ~too_confident
             # rand_mask_2 = (rng.random(batch_shape + self.state.shape) <= r) & ~too_confident
 
         type_1_feedback = np.stack((target, ~target), axis=-1)[..., None, None, None]  # (batch..., 2, 1, 1, 1), bool
-        clauses_ = clauses[..., None, None]  # (batch..., 2, clause_dim, 1, 1), bool
+        clauses_ = clauses[..., None, None, :]  # (batch..., 2, 1, 1, clause_dim), bool
 
         type1a = type_1_feedback & clauses_ & literals_ & rand_mask_1a
         type1b = type_1_feedback & ~(clauses_ & literals_) & rand_mask_1b
         type2 = ~type_1_feedback & clauses_ & ~literals_ & exclude & rand_mask_2
 
-        result["feedback_1a"] = feedback_1a = type1a.sum(batch_axes, self.state.dtype)  # (2, clause_dim, 2, in_dim), state.dtype
-        result["feedback_1b"] = feedback_1b = -type1b.sum(batch_axes, self.state.dtype)  # (2, clause_dim, 2, in_dim), state.dtype
-        result["feedback_2"] = feedback_2 = type2.sum(batch_axes, self.state.dtype)  # (2, clause_dim, 2, in_dim), state.dtype
+        result["feedback_1a"] = feedback_1a = type1a.sum(batch_axes, self.state.dtype)  # (2, 2, in_dim, clause_dim), state.dtype
+        result["feedback_1b"] = feedback_1b = -type1b.sum(batch_axes, self.state.dtype)  # negation of positive integer does not lead to integer overflow
+        result["feedback_2"] = feedback_2 = type2.sum(batch_axes, self.state.dtype)  # (2, 2, in_dim, clause_dim), state.dtype
 
         if use_1a: add_sat(self.state, feedback_1a, out=self.state)
         if use_1b: add_sat(self.state, feedback_1b, out=self.state)
@@ -128,7 +128,7 @@ class VectorizedBinaryTsetlinMachineTrainer:
         return result
 
 
-def test_forward():
+def test_clauses():
     config = dict(n_features=1, n_clauses=4)
     tm = VectorizedBinaryTsetlinMachineTrainer(**config)
     features = np.array([[True], [False]])  # literals = [[1, 0], [0, 1]]
@@ -143,8 +143,8 @@ def test_forward():
          [[1], [-1]],    # [1, 0]      | [0, 1]     | all([1])    = 1        | all([1, 1]) = 1
          [[-1], [1]],    # [0, 1]      | [1, 0]     | all([0])    = 0        | all([1, 0]) = 0
          [[-1], [-1]]],  # [0, 0]      | [1, 1]     | all([])     = 1        | all([1, 1]) = 1
-    ], dtype=tm.state.dtype)
-    assert tm.state.shape == (2, config["n_clauses"], 2, config["n_features"])
+    ], dtype=tm.state.dtype).transpose(0, 2, 3, 1)
+    assert tm.state.shape == (2, 2, config["n_features"], config["n_clauses"])
     clauses = tm(features)["clauses"]
     target = np.array([
         [[False, True, False, True], [False, True, False, True]],  # For X = [1], literals = [1, 0]
@@ -156,7 +156,7 @@ def test_forward():
 def test_forward_xor():
     """
     Test the XOR function.
-    y_pred(X) = u(x1x¯2 + ¯x1x2 − x1x2− x¯1x¯2)
+    y_pred(X) = u(x1¬x2 + ¬x1x2 − x1x2 - ¬x1¬x2)
     """
     config = dict(n_features=2, n_clauses=2)
     tm = VectorizedBinaryTsetlinMachineTrainer(**config)
@@ -173,8 +173,8 @@ def test_forward_xor():
          [[-1, 0], [0, -1]]],  # 1 | 1 | [[0, 1], [1, 0]] | [[1, 0], [0, 1]] | [[1, 0], [0, 0]]        | u(0 - 1) = u(-1) = 0
         [[[0, 0], [-1, -1]],   # 0 | 0 | [[1, 1], [0, 0]] | [[0, 0], [1, 1]] | [[1, 0], [0, 0]]        | u(0 - 1) = u(-1) = 0
          [[-1, -1], [0, 0]]],  # 0 | 1 | [[0, 0], [1, 1]] | [[1, 1], [0, 0]] | [[0, 0], [1, 0]]        | u(1 - 0) = u(1) = 1
-    ], dtype=tm.state.dtype)
-    assert tm.state.shape == (2, config["n_clauses"], 2, config["n_features"])
+    ], dtype=tm.state.dtype).transpose(0, 2, 3, 1)
+    assert tm.state.shape == (2, 2, config["n_features"], config["n_clauses"])
     predictions = tm(features)["predictions"]
     target = np.array([False, True, True, False])
     assert np.array_equal(predictions, target)
@@ -197,8 +197,8 @@ def test_fit_1a():
          [[1], [-1]],    # 0 | 1 |                 0 | 1 & [1, 0] = [1, 0] | [0, 0]
          [[-1], [1]],    # 0 | 2 |                 0 | 0 & [1, 0] = [0, 0] | [0, 0]
          [[-1], [-1]]],  # 0 | 3 |                 0 | 1 & [1, 0] = [1, 0] | [0, 0]
-    ], dtype=tm.state.dtype)
-    assert tm.state.shape == (2, config["n_clauses"], 2, config["n_features"])
+    ], dtype=tm.state.dtype).transpose(0, 2, 3, 1)
+    assert tm.state.shape == (2, 2, config["n_features"], config["n_clauses"])
     delta = tm(features, target, rng=None, use_1a=True, use_1b=False, use_2=False)["feedback_1a"]
     target_delta = np.array([
         [[[0], [0]],
@@ -209,7 +209,7 @@ def test_fit_1a():
          [[0], [0]],
          [[0], [0]],
          [[0], [0]]],
-    ])
+    ]).transpose(0, 2, 3, 1)
     assert np.array_equal(delta, target_delta)
     target_state = np.array([
         [[[1], [1]],     # change: [0, 0]
@@ -220,7 +220,7 @@ def test_fit_1a():
          [[1], [-1]],    # change: [0, 0]
          [[-1], [1]],    # change: [0, 0]
          [[-1], [-1]]],  # change: [0, 0]
-    ])
+    ]).transpose(0, 2, 3, 1)
     assert np.array_equal(tm.state, target_state)
 
 
@@ -241,8 +241,8 @@ def test_fit_1b():
          [[1], [-1]],    # 0 | 1 |                 0 | ![1, 0] = [0, 1]      | [0, 0]
          [[-1], [1]],    # 0 | 2 |                 0 | ![0, 0] = [1, 1]      | [0, 0]
          [[-1], [-1]]],  # 0 | 3 |                 0 | ![1, 0] = [0, 1]      | [0, 0]
-    ], dtype=tm.state.dtype)
-    assert tm.state.shape == (2, config["n_clauses"], 2, config["n_features"])
+    ], dtype=tm.state.dtype).transpose(0, 2, 3, 1)
+    assert tm.state.shape == (2, 2, config["n_features"], config["n_clauses"])
     delta = tm(features, target, rng=None, use_1a=False, use_1b=True, use_2=False)["feedback_1b"]
     target_delta = np.array([
         [[[-1], [-1]],
@@ -253,7 +253,7 @@ def test_fit_1b():
          [[0], [0]],
          [[0], [0]],
          [[0], [0]]],
-    ])
+    ]).transpose(0, 2, 3, 1)
     assert np.array_equal(delta, target_delta)
     target_state = np.array([
         [[[0], [0]],     # change: [-1, -1]
@@ -264,7 +264,7 @@ def test_fit_1b():
          [[1], [-1]],    # change: [0, 0]
          [[-1], [1]],    # change: [0, 0]
          [[-1], [-1]]],  # change: [0, 0]
-    ])
+    ]).transpose(0, 2, 3, 1)
     assert np.array_equal(tm.state, target_state)
 
 
@@ -285,8 +285,8 @@ def test_fit_2():
          [[1], [-1]],    # 0 | 1 |                 1 | 1 & [0, 1] = [0, 1] | [0, 1]
          [[-1], [1]],    # 0 | 2 |                 1 | 0 & [0, 1] = [0, 0] | [0, 0]
          [[-1], [-1]]],  # 0 | 3 |                 1 | 1 & [0, 1] = [0, 1] | [0, 1]
-    ], dtype=tm.state.dtype)
-    assert tm.state.shape == (2, config["n_clauses"], 2, config["n_features"])
+    ], dtype=tm.state.dtype).transpose(0, 2, 3, 1)
+    assert tm.state.shape == (2, 2, config["n_features"], config["n_clauses"])
     delta = tm(features, target, rng=None, use_1a=False, use_1b=False, use_2=True)["feedback_2"]
     target_delta = np.array([
         [[[0], [0]],
@@ -297,7 +297,7 @@ def test_fit_2():
          [[0], [1]],
          [[0], [0]],
          [[0], [1]]],
-    ])
+    ]).transpose(0, 2, 3, 1)
     assert np.array_equal(delta, target_delta)
     target_state = np.array([
         [[[1], [1]],     # change: [0, 0]
@@ -308,7 +308,7 @@ def test_fit_2():
          [[1], [0]],     # change: [0, 1]
          [[-1], [1]],    # change: [0, 0]
          [[-1], [0]]],   # change: [0, 1]
-    ])
+    ]).transpose(0, 2, 3, 1)
     assert np.array_equal(tm.state, target_state)
 
 

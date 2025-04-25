@@ -84,30 +84,31 @@ pub const Config = struct {
     }
 
     pub fn stateSize(self: Config) usize {
-        return 2 * self.n_clauses * 2 * self.n_features;
+        return 2 * 2 * self.n_features * self.n_clauses;
     }
 
     pub fn stateIndex(
         self: Config,
         i_polarity: usize,
-        i_clause: usize,
         i_negated: usize,
         i_feature: usize,
+        i_clause: usize,
     ) usize {
         std.debug.assert(i_polarity < 2);
-        std.debug.assert(i_clause < self.n_clauses);
         std.debug.assert(i_negated < 2);
         std.debug.assert(i_feature < self.n_features);
-        const stride_negated = self.n_features;
-        const stride_clause = stride_negated * 2;
-        const stride_polarity = stride_clause * self.n_clauses;
-        return i_feature + stride_negated * i_negated + stride_clause * i_clause + stride_polarity * i_polarity;
+        std.debug.assert(i_clause < self.n_clauses);
+        const stride_feature = self.n_clauses;
+        const stride_negated = stride_feature * self.n_features;
+        const stride_polarity = stride_negated * 2;
+        return stride_polarity * i_polarity + stride_negated * i_negated + stride_feature * i_feature + i_clause;
     }
 };
 
 
 /// 0.042881s
 pub fn getIncludesOnePass(comptime S: type, states: []S, includes: *BitVector) void {
+    std.debug.assert(@typeInfo(S).int.signedness == .signed);
     std.debug.assert(states.len == includes.len);
     for (0..states.len) |i_state|
         includes.setValue(i_state, states[i_state] >= 0);
@@ -115,6 +116,7 @@ pub fn getIncludesOnePass(comptime S: type, states: []S, includes: *BitVector) v
 
 /// 0.009739s
 pub fn getIncludesTwoPass(comptime S: type, states: []S, includes: *BitVector) void {
+    std.debug.assert(@typeInfo(S).int.signedness == .signed);
     std.debug.assert(states.len == includes.len);
     @memset(includes.bytes, 0);
     for (0..states.len) |i_state|
@@ -124,6 +126,7 @@ pub fn getIncludesTwoPass(comptime S: type, states: []S, includes: *BitVector) v
 
 /// 0.001773s
 pub fn getIncludesVector8(comptime S: type, states: []S, includes: *BitVector) void {
+    std.debug.assert(@typeInfo(S).int.signedness == .signed);
     std.debug.assert(states.len == includes.len);
     var i: usize = 0;
     while (i < states.len) : (i += 8) {
@@ -136,6 +139,7 @@ pub fn getIncludesVector8(comptime S: type, states: []S, includes: *BitVector) v
 
 /// 0.001386s
 pub fn getIncludesVector(comptime S: type, states: []S, includes: *BitVector) void {
+    std.debug.assert(@typeInfo(S).int.signedness == .signed);
     std.debug.assert(states.len == includes.len);
     var i: usize = 0;
     const l = std.simd.suggestVectorLength(S) orelse 1;
@@ -268,70 +272,54 @@ pub fn evaluateIncludesVector(
     if (@typeInfo(V).int.signedness != .signed) unreachable;
     var votes: V = 0;
 
-    // how many u1 lanes we can do in parallel?
-    const l = std.simd.suggestVectorLength(u1) orelse 1;
-    const feat_len = config.n_features;
+    // number of clauses we can do in parallel
+    const C = std.simd.suggestVectorLength(u1) orelse 1;
+    std.debug.assert(config.n_clauses % C == 0);
+    const C_bytes = C / 8;  // how many bytes that is
 
-    // only if our lane count is a multiple of 8 can we bit‐cast bytes ↔ masks
-    const byte_aligned = (l >= 8 and (l % 8) == 0);
-    const chunk_bytes = l / 8;
+    inline for (0..2) |i_polarity| {
+        var clause_off: usize = 0;
+        // step through clauses C at a time
+        while (clause_off < config.n_clauses) : (clause_off += C) {
+            // mask of “alive” clauses in this block
+            var mask: @Vector(C, u1) = @splat(1);
 
-    for (0..2) |i_polarity| {
-        for (0..config.n_clauses) |i_clause| {
-            // accumulator for this clause
-            var c: u1 = 1;
+            // for each feature, AND in the survive‐bits
+            for (0..config.n_features) |f| {
+                // broadcast feature bit
+                const fb: u1 = @intFromBool(features.getValue(f));
+                const fv: @Vector(C, u1) = @splat(fb);
+                const fnv: @Vector(C, u1) = ~fv;
 
-            // where the “positive” vs “negated” slices begin in the includes BitVector
-            const base_pos = config.stateIndex(i_polarity, i_clause, 0, 0);
-            const base_neg = config.stateIndex(i_polarity, i_clause, 1, 0);
+                // compute bit‐offsets of this feature’s clause‐block
+                const base_pos = config.stateIndex(i_polarity, 0, f, 0);
+                const base_neg = config.stateIndex(i_polarity, 1, f, 0);
+                const bitp = base_pos + clause_off;
+                const bitn = base_neg + clause_off;
+                const bytep = bitp / 8;
+                const byten = bitn / 8;
 
-            var f_off: usize = 0;
+                // slice out exactly C_bytes from the packed .bytes
+                const slice_pos = includes.bytes[bytep .. bytep + C_bytes];
+                const slice_neg = includes.bytes[byten .. byten + C_bytes];
 
-            // —— SIMD chunks ——
-            while (c != 0 and f_off + l <= feat_len) : (f_off += l) {
-                if (byte_aligned) {
-                    // slice out chunk_bytes, then [0..chunk_bytes] makes it an array
-                    const feat_slice = features.bytes[f_off/8 .. f_off/8 + chunk_bytes];
-                    const feats_vec: @Vector(l, u1) = @bitCast(feat_slice[0..chunk_bytes].*);
-                    const feats_neg = ~feats_vec;
+                // reinterpret as C lanes of u1
+                const ip: @Vector(C, u1) = @bitCast(slice_pos[0..C_bytes].*);
+                const in_: @Vector(C, u1) = @bitCast(slice_neg[0..C_bytes].*);
 
-                    const pos_slice = includes.bytes[(base_pos + f_off)/8 .. (base_pos + f_off)/8 + chunk_bytes];
-                    const neg_slice = includes.bytes[(base_neg + f_off)/8 .. (base_neg + f_off)/8 + chunk_bytes];
-                    const inc_pos: @Vector(l, u1) = @bitCast(pos_slice[0..chunk_bytes].*);
-                    const inc_neg: @Vector(l, u1) = @bitCast(neg_slice[0..chunk_bytes].*);
+                // (~ip | fv) & (~in | !fv)
+                mask &= (~ip | fv) & (~in_ | fnv);
 
-                    const both = (~inc_pos | feats_vec) & (~inc_neg | feats_neg);
-                    const chunk_c: u1 = @reduce(.And, both);
-                    c &= chunk_c;
-                } else {
-                    // fallback per-lane when not byte-aligned
-                    var j: usize = 0;
-                    while (j < l) : (j += 1) {
-                        // const inc_bit = includes.getValue(base_pos + f_off + j) == false or
-                        //                 includes.getValue(base_neg + f_off + j) == true;
-                        const feat_bit = features.getValue(f_off + j);
-                        const succ_p: u1 = if (!includes.getValue(base_pos + f_off + j) or feat_bit) 1 else 0;
-                        const succ_n: u1 = if (!includes.getValue(base_neg + f_off + j) or (!feat_bit)) 1 else 0;
-                        c &= (succ_p & succ_n);
-                    }
-                }
-                if (c == 0) break;
+                // early‐exit if none survive
+                // if (@popCount(mask) == 0) break;
+                if (@reduce(.And, mask) == 0) break;
             }
 
-            // —— scalar tail ——
-            while (c != 0 and f_off < feat_len) : (f_off += 1) {
-                const inc_p = includes.getValue(base_pos + f_off);
-                const inc_n = includes.getValue(base_neg + f_off);
-                const f = features.getValue(f_off);
-
-                // (~inc_p || f)  &&  (~inc_n || !f)
-                const succ_p: u1 = if (!inc_p or f) 1 else 0;
-                const succ_n: u1 = if (!inc_n or (!f)) 1 else 0;
-                c &= (succ_p & succ_n);
-            }
-
-            // if this clause survived, cast to +1 or –1 vote
-            if (i_polarity == 0) votes += c else votes -= c;
+            // how many survivors?
+            // const d: usize = @popCount(mask);
+            const d: usize = @reduce(.Add, mask);
+            const dv: V = @intCast(d);
+            if (i_polarity == 0) votes += dv else votes -= dv;
         }
     }
 
@@ -424,46 +412,48 @@ pub fn fit(
     comptime use_type_2_feedback: bool,
 ) i64 {
     _ = .{use_type_1a_feedback, use_type_1b_feedback, use_type_2_feedback};
-    var votes: V = 0;
-    for (0..2) |i_polarity| for (0..config.n_clauses) |i_clause| {
-        const clause: u1 = getClauseU1(config, S, states, features, i_polarity, i_clause);
-        if (i_polarity == 0) votes += clause else votes -= clause;
-    };
-
-    // Resource allocation...
-    // if (target == true and votes >= t or target == false and votes < -t) {
-    //     return votes;
-    // }
-    const p_clause_update: F = @as(F, @floatFromInt(@min(@max(if (target) -votes else votes, -t), t))) / (@as(F, @floatFromInt(2 * t))) + 0.5;
-
-    // if (maybe_random) |random| if (random.float(F) >= p_clause_update) {
-    //     return votes;
+    _ = .{config, states, features, target, t, F, r, maybe_random};
+    return 0;
+    // var votes: V = 0;
+    // for (0..2) |i_polarity| for (0..config.n_clauses) |i_clause| {
+    //     const clause: u1 = getClauseU1(config, S, states, features, i_polarity, i_clause);
+    //     if (i_polarity == 0) votes += clause else votes -= clause;
     // };
-
-    for (0..2) |i_polarity| for (0..config.n_clauses) |i_clause| {
-        // Use resource allocation:
-        if (maybe_random) |random| if (random.float(F) >= p_clause_update) {
-            continue;
-        };
-
-        const clause: u1 = getClauseU1(config, S, states, features, i_polarity, i_clause);
-
-        for (0..2) |i_negated| for (0..config.n_features) |i_feature| {
-            var literal: u1 = @intFromBool(features.getValue(i_feature));
-            literal = if (i_negated == 0) literal else ~literal;
-
-            const i_state = config.stateIndex(i_polarity, i_clause, i_negated, i_feature);
-            if (@intFromBool(target) != i_polarity) {
-                states.*[i_state] +|= @intFromBool(use_type_1a_feedback and (clause & literal) == 1);
-                states.*[i_state] -|= @intFromBool(use_type_1b_feedback and (clause & literal) == 0 and (if (maybe_random) |random| randomUniform(random, R) >= r else true));
-            } else {
-                const excluded = states.*[i_state] < 0;
-                states.*[i_state] +|= @intFromBool(use_type_2_feedback and (clause == 1) and (literal == 0) and excluded and (if (maybe_random) |random| randomUniform(random, R) < r else true));
-            }
-        };
-    };
-
-    return votes;
+    //
+    // // Resource allocation...
+    // // if (target == true and votes >= t or target == false and votes < -t) {
+    // //     return votes;
+    // // }
+    // const p_clause_update: F = @as(F, @floatFromInt(@min(@max(if (target) -votes else votes, -t), t))) / (@as(F, @floatFromInt(2 * t))) + 0.5;
+    //
+    // // if (maybe_random) |random| if (random.float(F) >= p_clause_update) {
+    // //     return votes;
+    // // };
+    //
+    // for (0..2) |i_polarity| for (0..config.n_clauses) |i_clause| {
+    //     // Use resource allocation:
+    //     if (maybe_random) |random| if (random.float(F) >= p_clause_update) {
+    //         continue;
+    //     };
+    //
+    //     const clause: u1 = getClauseU1(config, S, states, features, i_polarity, i_clause);
+    //
+    //     for (0..2) |i_negated| for (0..config.n_features) |i_feature| {
+    //         var literal: u1 = @intFromBool(features.getValue(i_feature));
+    //         literal = if (i_negated == 0) literal else ~literal;
+    //
+    //         const i_state = config.stateIndex(i_polarity, i_clause, i_negated, i_feature);
+    //         if (@intFromBool(target) != i_polarity) {
+    //             states.*[i_state] +|= @intFromBool(use_type_1a_feedback and (clause & literal) == 1);
+    //             states.*[i_state] -|= @intFromBool(use_type_1b_feedback and (clause & literal) == 0 and (if (maybe_random) |random| randomUniform(random, R) >= r else true));
+    //         } else {
+    //             const excluded = states.*[i_state] < 0;
+    //             states.*[i_state] +|= @intFromBool(use_type_2_feedback and (clause == 1) and (literal == 0) and excluded and (if (maybe_random) |random| randomUniform(random, R) < r else true));
+    //         }
+    //     };
+    // };
+    //
+    // return votes;
 }
 
 test fit {
