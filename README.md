@@ -28,21 +28,26 @@ Unlike others implementation, this implementation does not use any floating poin
 Feature $x_i$ is an input bit at position $i$ in the input vector $X$. It can be either 0 or 1. We have $n_{\text{features}}$ features.
 
 A literal $l_i$ is a feature $x_i$ itself:
+
 $$
 l_i = x_i
 $$
+
 This way, literal set $L=\{x_0, x_1, \ldots, x_{n_{\text{features}}}\}$ has $n_{\text{literals}} = n_{\text{features}}$ literals.
 
 We can extend literal definition to also have negation of the feature:
+
 $$
 l_{i + n_{\text{features}}} = \neg x_i
 $$
+
 This way, literal set $L=\{x_0, x_1, \ldots, x_{n_{\text{features}}}, \neg x_0, \neg x_1, \ldots, \neg x_{n_{\text{features}}}\}$ has $n_{\text{literals}} = 2 \cdot n_{\text{features}}$ literals.
 
 > [!IMPORTANT]
 > Tsetlin machine does not know about existence of features - it operates on literals. So it does not care whether the feature was negated or not, nor during inference, nor during training.
 
 Literal subset $L_j$ is a subset of literal set $L$ we defined above, i.e.:
+
 $$
 L_j = \{l_{42}, l_{69}, l_{1337}\}
 $$
@@ -50,6 +55,7 @@ $$
 Literal subsets are learnable model's parameters. Each of them can be stored either as an index set of included literals, or as a binary mask of included literals. Example: the set `{0, 2}` will be the same as binary mask `[1, 0, 1, 0, 0, 0, 0, 0]` for 8 elements.
 
 Clause $C_j$ is a logical AND of a literal subset $L_j$:
+
 $$
 C_j = \bigwedge L_j
 $$
@@ -60,6 +66,7 @@ Clause is a definition of a single neuron. It fires when all literals in the lit
 > We can omit feature negation in literal definition. This halves number of literals and model size, but clauses may not learn some patterns, i.e. when we want to teach clause to fire when our first feature $x_0$ is 0.
 
 Binary Tsetlin machine defines positive $C^{+}$ and negative $C^{-}$ polarity clauses. Positive polarity clauses votes for target value $y$ being $1$, negative polarity clauses votes for target value $y$ being $0$:
+
 $$
 \text{votes} = \sum C^{+} - \sum C^{-}
 $$
