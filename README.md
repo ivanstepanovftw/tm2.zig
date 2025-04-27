@@ -21,7 +21,8 @@ Unlike others implementation, this implementation does not use any floating poin
 
 ## Changes
 
-- 27 Apr 2025: inference now 5 times faster that first commit
+- 27 Apr 2025: (5352175c) inference now 5 times faster than the first commit
+- 27 Apr 2025: (8694edda) fixed step size bug, now inference again 5 times faster. It is 25 times faster than the first commit!
 
 ## Learn basics
 
