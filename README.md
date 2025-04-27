@@ -28,11 +28,15 @@ Unlike others implementation, this implementation does not use any floating poin
 Feature $x_i$ is an input bit at position $i$ in the input vector $X$. It can be either 0 or 1. We have $n_{\text{features}}$ features.
 
 A literal $l_i$ is a feature $x_i$ itself:
-$$l_i = x_i$$
+$$
+l_i = x_i
+$$
 This way, literal set $L=\{x_0, x_1, \ldots, x_{n_{\text{features}}}\}$ has $n_{\text{literals}} = n_{\text{features}}$ literals.
 
 We can extend literal definition to also have negation of the feature:
-$$l_{i + n_{\text{features}}} = \neg x_i$$
+$$
+l_{i + n_{\text{features}}} = \neg x_i
+$$
 This way, literal set $L=\{x_0, x_1, \ldots, x_{n_{\text{features}}}, \neg x_0, \neg x_1, \ldots, \neg x_{n_{\text{features}}}\}$ has $n_{\text{literals}} = 2 \cdot n_{\text{features}}$ literals.
 
 > [!IMPORTANT]
@@ -59,6 +63,7 @@ Binary Tsetlin machine defines positive $C^{+}$ and negative $C^{-}$ polarity cl
 $$
 \text{votes} = \sum C^{+} - \sum C^{-}
 $$
+
 $$
 \hat{y} = \text{votes} \geq 0
 $$
