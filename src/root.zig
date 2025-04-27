@@ -294,36 +294,24 @@ pub fn evaluateIncludesVector(
     includes: BitVector,
     features: BitVector,
 ) V {
-    // only signed V supported
     if (@typeInfo(V).int.signedness != .signed) unreachable;
     var votes: V = 0;
-    const l = alignForward(std.simd.suggestVectorLength(u8) orelse 1, 8);
-    // const l = 8;
-    std.debug.assert(l % 8 == 0);
+    const l = std.simd.suggestVectorLength(u8) orelse 1;
+    const Vec = @Vector(l, u8);
 
     for (0..2) |i_polarity| {
         for (0..config.n_clauses) |i_clause| {
-            // accumulator mask: must stay 0xFF to indicate clause satisfied
             var c: u8 = 0xFF;
-
             var i_feature: usize = 0;
-
-            // —— SIMD chunks (each chunk = l features = byteCount bytes) ——
-            while (c == 0xFF and i_feature + l < config.n_features) : (i_feature += l) {
-                // load byteCount bytes from features
-                const literal_pos: @Vector(l/8, u8) = @bitCast(features.bytes[i_feature/8 .. (i_feature + l)/8][0..l/8].*);
-                const literal_neg: @Vector(l/8, u8) = ~literal_pos;
-
-                // load the same slice from includes (pos vs neg)
+            while (c == 0xFF and i_feature + l * 8 < config.n_features) : (i_feature += l * 8) {
+                const literal_pos: Vec = @bitCast(features.bytes[i_feature/8 .. i_feature/8 + l][0..l].*);
+                const literal_neg: Vec = ~literal_pos;
                 const i_pos = config.stateIndex(i_polarity, i_clause, 0, i_feature);
                 const i_neg = config.stateIndex(i_polarity, i_clause, 1, i_feature);
-                const includes_pos: @Vector(l/8, u8) = @bitCast(includes.bytes[i_pos/8 .. (i_pos + l)/8][0..l/8].*);
-                const includes_neg: @Vector(l/8, u8) = @bitCast(includes.bytes[i_neg/8 .. (i_neg + l)/8][0..l/8].*);
-
+                const includes_pos: Vec = @bitCast(includes.bytes[i_pos/8 .. i_pos/8 + l][0..l].*);
+                const includes_neg: Vec = @bitCast(includes.bytes[i_neg/8 .. i_neg/8 + l][0..l].*);
                 c &= @reduce(.And, (~includes_pos | literal_pos) & (~includes_neg | literal_neg));
             }
-
-            // —— scalar tail for remaining features ——
             while (c == 0xFF and i_feature < config.n_features) : (i_feature += 1) {
                 const feature_bit: u8 = if (features.getValue(i_feature)) 0xFF else 0;
                 const i_pos = config.stateIndex(i_polarity, i_clause, 0, i_feature);
