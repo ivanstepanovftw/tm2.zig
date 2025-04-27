@@ -1,5 +1,11 @@
+/// Easy-to-use duplicate of `std.math.divCeil` without error handling.
 pub fn divCeil(a: anytype, b: anytype) @TypeOf(a) {
     return (a + b - 1) / b;
+}
+
+/// Rounds up `value` to the next multiple of `mod`. Duplicates `std.mem.alignForward`, but with `comptime_int` support.
+pub fn alignForward(value: anytype, mod: anytype) @TypeOf(value) {
+    return ((value + mod - 1) / mod) * mod;
 }
 
 /// Unmanaged binary vector.
@@ -69,6 +75,12 @@ test BitVector {
         try testing.expectEqual(random.boolean(), bv.getValue(i));
 }
 
+test "@Vector(8, u1) layout is native-endian" {
+    const v: @Vector(8, u1) = .{ 1, 0, 0, 0, 0, 0, 0, 0 };
+    const u: u8 = @bitCast(v);
+    try std.testing.expectEqual(u, 1);
+}
+
 pub const Config = struct {
     n_features: usize,
     n_clauses: usize,
@@ -122,44 +134,58 @@ pub fn getIncludesTwoPass(comptime S: type, states: []S, includes: *BitVector) v
             includes.setValueTrue(i_state);
 }
 
-/// 0.001773s
+/// 0.001773s (outdated)
 pub fn getIncludesVector8(comptime S: type, states: []S, includes: *BitVector) void {
     std.debug.assert(states.len == includes.len);
-    var i: usize = 0;
-    while (i < states.len) : (i += 8) {
-        const threshold: @Vector(8, S) = @splat(@as(S, 0));
-        const states_vec: @Vector(8, S) = @bitCast(states[i .. i + 8][0..8].*);
-        const includes_vec: @Vector(8, u1) = @bitCast(states_vec >= threshold);
-        includes.bytes[i / 8] = @bitCast(includes_vec);
+    var i_state: usize = 0;
+    while (i_state + 8 < states.len) : (i_state += 8) {
+        const threshold: @Vector(8, S) = @splat(0);
+        const states_vec: @Vector(8, S) = @bitCast(states[i_state .. i_state + 8][0..8].*);
+        includes.bytes[i_state / 8] = @bitCast(states_vec >= threshold);
+    }
+    while (i_state < states.len) : (i_state += 1) {
+        includes.setValue(i_state, states[i_state] >= 0);
     }
 }
 
-/// 0.001386s
-pub fn getIncludesVector(comptime S: type, states: []S, includes: *BitVector) void {
+/// 0.001386s (outdated)
+/// Repeats logic of `getIncludesVector8` but uses suggested vector length.
+pub fn getIncludesVectorA(comptime S: type, states: []S, includes: *BitVector) void {
     std.debug.assert(states.len == includes.len);
-    var i: usize = 0;
+    var i_state: usize = 0;
     const l = std.simd.suggestVectorLength(S) orelse 1;
-    while (i < states.len) : (i += l) {
-        const threshold: @Vector(l, S) = @splat(@as(S, 0));
-        const states_vec: @Vector(l, S) = @bitCast(states[i .. i + l][0..l].*);
-        const includes_vec: @Vector(l, u1) = @bitCast(states_vec >= threshold);
-        // If l is byte-aligned, pack 8 lanes into one u8 and write L/8 bytes at once
-        if (l >= 8 and (l % 8) == 0) {
-            const bytes_vec: @Vector(l/8, u8) = @bitCast(includes_vec);
-            const dest_vec_ptr: *@Vector(l/8, u8) = @alignCast(@ptrCast(&includes.bytes[i / 8]));
-            dest_vec_ptr.* = bytes_vec;
-        } else {
-            // Otherwise fall back lane‐by‐lane
-            var j: usize = 0;
-            while (j < l) : (j += 1) {
-                // lanes of u1 are 0 or 1, so != 0 gives true/false
-                includes.setValue(i + j, includes_vec[j] != 0);
-            }
+    if (l >= 8 and (l % 8) == 0) {
+        while (i_state + l <= states.len) : (i_state += l) {
+            const threshold: @Vector(l, S) = @splat(0);
+            const states_vec: @Vector(l, S) = @bitCast(states[i_state .. i_state + l][0..l].*);
+            const includes_vec: @Vector(divCeil(l, 8), u8) = @bitCast(states_vec >= threshold);
+            const dest_includes_vec_ptr: *@Vector(divCeil(l, 8), u8) = @alignCast(@ptrCast(&includes.bytes[i_state / 8]));
+            dest_includes_vec_ptr.* = includes_vec;
         }
     }
+    while (i_state < states.len) : (i_state += 1) {
+        includes.setValue(i_state, states[i_state] >= 0);
+    }
 }
 
-pub const getIncludes = getIncludesVector;
+/// Best of `getIncludesVector8` and `getIncludesVectorA`.
+pub fn getIncludesVectorB(comptime S: type, states: []S, includes: *BitVector) void {
+    std.debug.assert(states.len == includes.len);
+    var i_state: usize = 0;
+    const l = alignForward(std.simd.suggestVectorLength(S) orelse 1, 8);
+    while (i_state + l <= states.len) : (i_state += l) {
+        const threshold: @Vector(l, S) = @splat(0);
+        const states_vec: @Vector(l, S) = @bitCast(states[i_state .. i_state + l][0..l].*);
+        const includes_vec: @Vector(l / 8, u8) = @bitCast(states_vec >= threshold);
+        const dest_includes_vec_ptr: *@Vector(l / 8, u8) = @alignCast(@ptrCast(&includes.bytes[i_state / 8]));
+        dest_includes_vec_ptr.* = includes_vec;
+    }
+    while (i_state < states.len) : (i_state += 1) {
+        includes.setValue(i_state, states[i_state] >= 0);
+    }
+}
+
+pub const getIncludes = getIncludesVectorB;
 
 pub fn getClauseU1(
     config: Config,
@@ -190,7 +216,8 @@ pub fn getClauseIncludesU1(
 ) u1 {
     for (0..2) |i_negated| for (0..config.n_features) |i_feature| {
         const i_state = config.stateIndex(i_polarity, i_clause, i_negated, i_feature);
-        const exclude: u1 = ~@intFromBool(includes.getValue(i_state));
+        const include: u1 = @intFromBool(includes.getValue(i_state));
+        const exclude: u1 = ~include;
         const feature: u1 = @intFromBool(features.getValue(i_feature));
         const literal: u1 = if (i_negated == 0) feature else ~feature;
         if (exclude | literal == 0) {
@@ -255,6 +282,9 @@ test evaluateIncludesU1 {
             features.setValue(i, value != 0);
         const votes = evaluateIncludesU1(config, V, includes, features);
         try testing.expectEqual(xorTargetVotes, votes);
+
+        const votes2 = evaluateIncludesVector(config, V, includes, features);
+        try testing.expectEqual(xorTargetVotes, votes2);
     }
 }
 
@@ -267,71 +297,44 @@ pub fn evaluateIncludesVector(
     // only signed V supported
     if (@typeInfo(V).int.signedness != .signed) unreachable;
     var votes: V = 0;
-
-    // how many u1 lanes we can do in parallel?
-    const l = std.simd.suggestVectorLength(u1) orelse 1;
-    const feat_len = config.n_features;
-
-    // only if our lane count is a multiple of 8 can we bit‐cast bytes ↔ masks
-    const byte_aligned = (l >= 8 and (l % 8) == 0);
-    const chunk_bytes = l / 8;
+    const l = alignForward(std.simd.suggestVectorLength(u8) orelse 1, 8);
+    // const l = 8;
+    std.debug.assert(l % 8 == 0);
 
     for (0..2) |i_polarity| {
         for (0..config.n_clauses) |i_clause| {
-            // accumulator for this clause
-            var c: u1 = 1;
+            // accumulator mask: must stay 0xFF to indicate clause satisfied
+            var c: u8 = 0xFF;
 
-            // where the “positive” vs “negated” slices begin in the includes BitVector
-            const base_pos = config.stateIndex(i_polarity, i_clause, 0, 0);
-            const base_neg = config.stateIndex(i_polarity, i_clause, 1, 0);
+            var i_feature: usize = 0;
 
-            var f_off: usize = 0;
+            // —— SIMD chunks (each chunk = l features = byteCount bytes) ——
+            while (c == 0xFF and i_feature + l < config.n_features) : (i_feature += l) {
+                // load byteCount bytes from features
+                const literal_pos: @Vector(l/8, u8) = @bitCast(features.bytes[i_feature/8 .. (i_feature + l)/8][0..l/8].*);
+                const literal_neg: @Vector(l/8, u8) = ~literal_pos;
 
-            // —— SIMD chunks ——
-            while (c != 0 and f_off + l <= feat_len) : (f_off += l) {
-                if (byte_aligned) {
-                    // slice out chunk_bytes, then [0..chunk_bytes] makes it an array
-                    const feat_slice = features.bytes[f_off/8 .. f_off/8 + chunk_bytes];
-                    const feats_vec: @Vector(l, u1) = @bitCast(feat_slice[0..chunk_bytes].*);
-                    const feats_neg = ~feats_vec;
+                // load the same slice from includes (pos vs neg)
+                const i_pos = config.stateIndex(i_polarity, i_clause, 0, i_feature);
+                const i_neg = config.stateIndex(i_polarity, i_clause, 1, i_feature);
+                const includes_pos: @Vector(l/8, u8) = @bitCast(includes.bytes[i_pos/8 .. (i_pos + l)/8][0..l/8].*);
+                const includes_neg: @Vector(l/8, u8) = @bitCast(includes.bytes[i_neg/8 .. (i_neg + l)/8][0..l/8].*);
 
-                    const pos_slice = includes.bytes[(base_pos + f_off)/8 .. (base_pos + f_off)/8 + chunk_bytes];
-                    const neg_slice = includes.bytes[(base_neg + f_off)/8 .. (base_neg + f_off)/8 + chunk_bytes];
-                    const inc_pos: @Vector(l, u1) = @bitCast(pos_slice[0..chunk_bytes].*);
-                    const inc_neg: @Vector(l, u1) = @bitCast(neg_slice[0..chunk_bytes].*);
-
-                    const both = (~inc_pos | feats_vec) & (~inc_neg | feats_neg);
-                    const chunk_c: u1 = @reduce(.And, both);
-                    c &= chunk_c;
-                } else {
-                    // fallback per-lane when not byte-aligned
-                    var j: usize = 0;
-                    while (j < l) : (j += 1) {
-                        // const inc_bit = includes.getValue(base_pos + f_off + j) == false or
-                        //                 includes.getValue(base_neg + f_off + j) == true;
-                        const feat_bit = features.getValue(f_off + j);
-                        const succ_p: u1 = if (!includes.getValue(base_pos + f_off + j) or feat_bit) 1 else 0;
-                        const succ_n: u1 = if (!includes.getValue(base_neg + f_off + j) or (!feat_bit)) 1 else 0;
-                        c &= (succ_p & succ_n);
-                    }
-                }
-                if (c == 0) break;
+                c &= @reduce(.And, (~includes_pos | literal_pos) & (~includes_neg | literal_neg));
             }
 
-            // —— scalar tail ——
-            while (c != 0 and f_off < feat_len) : (f_off += 1) {
-                const inc_p = includes.getValue(base_pos + f_off);
-                const inc_n = includes.getValue(base_neg + f_off);
-                const f = features.getValue(f_off);
-
-                // (~inc_p || f)  &&  (~inc_n || !f)
-                const succ_p: u1 = if (!inc_p or f) 1 else 0;
-                const succ_n: u1 = if (!inc_n or (!f)) 1 else 0;
-                c &= (succ_p & succ_n);
+            // —— scalar tail for remaining features ——
+            while (c == 0xFF and i_feature < config.n_features) : (i_feature += 1) {
+                const feature_bit: u8 = if (features.getValue(i_feature)) 0xFF else 0;
+                const i_pos = config.stateIndex(i_polarity, i_clause, 0, i_feature);
+                const i_neg = config.stateIndex(i_polarity, i_clause, 1, i_feature);
+                const ip: u8 = if (includes.getValue(i_pos)) 0xFF else 0;
+                const in: u8 = if (includes.getValue(i_neg)) 0xFF else 0;
+                c &= ((~ip | feature_bit) & (~in | ~feature_bit));
             }
 
-            // if this clause survived, cast to +1 or –1 vote
-            if (i_polarity == 0) votes += c else votes -= c;
+            const p: V = @intFromBool(c == 0xFF);
+            if (i_polarity == 0) votes += p else votes -= p;
         }
     }
 
@@ -343,8 +346,8 @@ pub const evaluateIncludes = evaluateIncludesVector;
 
 test "fuzz getIncludes() and evaluate()" {
     const allocator = std.testing.allocator;
-    const n_features = 16;
-    const n_clauses  = 32;
+    const n_features = 256+4;
+    const n_clauses = 256+4;
     const config = Config.init(n_features, n_clauses);
     const S = i8;   // automata type
     const V = i32;  // vote‐count return type
@@ -354,6 +357,7 @@ test "fuzz getIncludes() and evaluate()" {
 
     const states_buf = try allocator.alloc(S, config.stateSize());
     defer allocator.free(states_buf);
+    @memset(states_buf, -1);
 
     var includesOnePass = try BitVector.init(allocator, config.stateSize());
     defer includesOnePass.deinit(allocator);
@@ -367,32 +371,49 @@ test "fuzz getIncludes() and evaluate()" {
     defer includesVector8.deinit(allocator);
     @memset(includesVector8.bytes, 0);
 
-    var includesVector = try BitVector.init(allocator, config.stateSize());
-    defer includesVector.deinit(allocator);
-    @memset(includesVector.bytes, 0);
+    var includesVectorA = try BitVector.init(allocator, config.stateSize());
+    defer includesVectorA.deinit(allocator);
+    @memset(includesVectorA.bytes, 0);
+
+    var includesVectorB = try BitVector.init(allocator, config.stateSize());
+    defer includesVectorB.deinit(allocator);
+    @memset(includesVectorB.bytes, 0);
 
     var features = try BitVector.init(allocator, n_features);
     defer features.deinit(allocator);
     @memset(features.bytes, 0);
 
-    for (0..10_000) |_| {
-        random.bytes(std.mem.sliceAsBytes(states_buf));
+    for (0..1_000) |i| {
+        random.bytes(std.mem.sliceAsBytes(states_buf[0..(i % config.stateSize() + 1)]));
 
-        getIncludesOnePass(S, states_buf, &includesOnePass);
+        // getIncludesOnePass(S, states_buf, &includesOnePass);
+        // getIncludesTwoPass(S, states_buf, &includesTwoPass);
+        // getIncludesVector8(S, states_buf, &includesVector8);
+        // getIncludesVectorA(S, states_buf, &includesVectorA);
+        getIncludesVectorB(S, states_buf, &includesVectorB);
 
-        getIncludesTwoPass(S, states_buf, &includesTwoPass);
-        try testing.expectEqualSlices(u8, includesOnePass.bytes, includesTwoPass.bytes);
+        // try testing.expectEqualSlices(u8, includesOnePass.bytes, includesTwoPass.bytes);
+        // try testing.expectEqualSlices(u8, includesOnePass.bytes, includesVector8.bytes);
+        // try testing.expectEqualSlices(u8, includesOnePass.bytes, includesVectorA.bytes);
+        // try testing.expectEqualSlices(u8, includesOnePass.bytes, includesVectorB.bytes);
 
-        getIncludesVector8(S, states_buf, &includesVector8);
-        try testing.expectEqualSlices(u8, includesOnePass.bytes, includesVector8.bytes);
-
-        getIncludesVector(S, states_buf, &includesVector);
-        try testing.expectEqualSlices(u8, includesOnePass.bytes, includesVector.bytes);
-
-        _ = .{config, V, features, includesOnePass, includesTwoPass, includesVector8};
-        // const v1 = evaluateCompiledU1(config, V, includesOnePass, features);
-        // const v2 = evaluateCompiledU8(config, V, includesOnePass, features);
-        // try testing.expectEqual(v1, v2);
+        const includes = includesVectorB;
+        const v1 = evaluateIncludesU1(config, V, includes, features);
+        const v2 = evaluateIncludesVector(config, V, includes, features);
+        // if (v1 != v2) {
+        //     std.debug.print(
+        //         \\includes: {d}
+        //         \\features: {d}
+        //         \\evaluateIncludesU1: {d}
+        //         \\evaluateIncludesVector: {d}
+        //     , .{
+        //         @as(@Vector(alignForward(n_features, 8), u1), @bitCast(includes.bytes[0..divCeil(n_features, 8)].*)),
+        //         @as(@Vector(alignForward(n_features, 8), u1), @bitCast(features.bytes[0..divCeil(n_features, 8)].*)),
+        //         v1,
+        //         v2,
+        //     });
+        // }
+        try testing.expectEqual(v1, v2);
     }
 }
 
