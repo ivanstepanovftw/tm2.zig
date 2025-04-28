@@ -1,7 +1,7 @@
 # tm2.zig
 Binary Tsetlin machine implementation in Zig. Currently, very slow training, fast inference performance. Covered by tests. CPU only, yet.
 
-## Tsetlin machine 
+## Tsetlin machine
 In short, Tsetlin machine is a type of machine learning model. It is energy efficient, does not use floating point computations, bitwise, losslessly quantizable down to 1 bit per weight, lossy compressible up to how many important clauses you want to keep, weights are interpretable (if your inputs are interpretable), it does not overfit on small dataset, it does not require your task to be differentiable, have linear time complexity... God knows what else can it do.
 
 ## This work
@@ -21,10 +21,13 @@ Unlike others implementation, this implementation does not use any floating poin
 
 ## Changes
 
-- 27 Apr 2025: (5352175c) inference now 5 times faster than the first commit
+- 27 Apr 2025: (5352175c) inference now 5 times faster than the first commit.
 - 27 Apr 2025: (8694edda) fixed step size bug, now inference again 5 times faster. It is 25 times faster than the first commit!
+- 28 Apr 2025: New ablated resource allocation - twice as fast converging to the same accuracy. 17.5% performance improvement per epoch.
 
-## Learn basics
+## Learn
+
+### Inference
 
 Feature $x_i$ is an input bit at position $i$ in the input vector $X$. It can be either 0 or 1. We have $n_{\text{features}}$ features.
 
@@ -58,7 +61,7 @@ Literal subsets are learnable model's parameters. Each of them can be stored eit
 Clause $C_j$ is a logical AND of a literal subset $L_j$:
 
 $$
-C_j = \bigwedge L_j
+C_j = \bigwedge L_j = \bigwedge_{l_i \in L_j} l_i
 $$
 
 Clause is a definition of a single neuron. It fires when all literals in the literal subset are true.
@@ -153,6 +156,30 @@ Type II feedback penalizes **Exclude** when $C_j(X) = 1$ and $l_k = 0$.
 |                 | $0$             | $1$           | $0$       | $0$        |
 |                 | $0$             | $0$           | $0$       | $0$        |
 
+### Resource allocation
+
+We do not want our network to overfit on very similar samples that are prevail in the dataset. This way target value $T$ for $\text{votes}$ was introduced. It means that sample that got votes larger than this threshold will not be used for training in current step.
+
+Original resource allocation defines it as a gradual per-clause update skip:
+```zig
+// ...in the fit() after counting votes:
+const p_clause_update: f32 = @as(f32, @floatFromInt(std.math.clamp(if (target) -votes else votes, -t, t))) / (@as(f32, @floatFromInt(2 * t))) + 0.5;
+// feedback loop:
+for (0..2) |i_polarity| for (0..n_clauses) |i_clause| if (random.float(f32) < p_clause_update) {
+    // give feedback to this automata clause...
+};
+// return prediction...
+```
+It can be ablated this to a simple per-sample update skip:
+```zig
+// ...in the fit() after counting votes:
+if (target == true and votes < t or target == false and votes >= -t)) {
+    // feedback loop...
+}
+// return prediction...
+```
+which does not use floating point computations, division and PRNGs. It gives twice as early converging to the same accuracy, while being a bit slower or equal in an average performance per epoch. This check is an extreme case of the original resource allocation.
+
 ## Usage
 ### IMDB classification
 I have achieved 86%+ accuracy (no parameter tuning was performed) at 2.44 MiB compiled state with the following parameters:
@@ -166,29 +193,29 @@ S: i8, t: 8, r: 11990383208106557440 (0.65), n_features: 40000, n_clauses: 128, 
     ➜  tm2.zig git:(main) ✗ zig build run -freference-trace --release=fast
     S: i8, t: 8, r: 11990383208106557440 (0.65), n_features: 40000, n_clauses: 128, state size: 20480000 (19.5MiB)
     epoch | epochs | sample | samples | train   | test    | best    | training   | epoch     | train     | compile   | test      | fit perf   | test perf
-        1 |     25 |  25000 |   25000 |  69.68% |  71.66% |  71.66% |       102s |  102.190s |  102.027s | 0.001781s | 0.161133s | 245.03it/s | 155151.42it/s
-        2 |     25 |  25000 |   25000 |  76.22% |  80.52% |  80.52% |       195s |   93.205s |   93.037s | 0.001620s | 0.166739s | 268.71it/s | 149934.84it/s
-        3 |     25 |  25000 |   25000 |  81.66% |  81.36% |  81.36% |       280s |   84.235s |   84.059s | 0.001489s | 0.173763s | 297.41it/s | 143874.48it/s
-        4 |     25 |  25000 |   25000 |  81.09% |  64.20% |  81.36% |       365s |   85.320s |   85.149s | 0.001613s | 0.169188s | 293.60it/s | 147764.20it/s
-        5 |     25 |  25000 |   25000 |  81.63% |  75.91% |  81.36% |       450s |   85.288s |   85.106s | 0.002135s | 0.179902s | 293.75it/s | 138964.88it/s
+        1 |     25 |  25000 |   25000 |  68.36% |  83.63% |  83.63% |        83s |   82.648s |   82.497s | 0.001603s | 0.149338s | 303.04it/s | 167405.58it/s
+        2 |     25 |  25000 |   25000 |  79.29% |  83.15% |  83.63% |       158s |   75.167s |   75.003s | 0.001775s | 0.162079s | 333.32it/s | 154246.03it/s
+        3 |     25 |  25000 |   25000 |  80.34% |  83.66% |  83.66% |       230s |   72.445s |   72.278s | 0.001546s | 0.165801s | 345.89it/s | 150783.39it/s
+        4 |     25 |  25000 |   25000 |  82.06% |  85.08% |  85.08% |       300s |   69.847s |   69.676s | 0.001711s | 0.168993s | 358.80it/s | 147935.38it/s
+        5 |     25 |  25000 |   25000 |  83.52% |  80.02% |  85.08% |       369s |   68.575s |   68.408s | 0.001751s | 0.165967s | 365.46it/s | 150632.80it/s
     epoch | epochs | sample | samples | train   | test    | best    | training   | epoch     | train     | compile   | test      | fit perf   | test perf
-        6 |     25 |  25000 |   25000 |  83.86% |  83.84% |  83.84% |       532s |   81.768s |   81.587s | 0.001856s | 0.178881s | 306.42it/s | 139757.44it/s
-        7 |     25 |  25000 |   25000 |  84.36% |  80.15% |  83.84% |       612s |   80.050s |   79.868s | 0.001709s | 0.180481s | 313.02it/s | 138518.42it/s
-        8 |     25 |  25000 |   25000 |  84.12% |  84.28% |  84.28% |       698s |   85.545s |   85.350s | 0.001709s | 0.192999s | 292.91it/s | 129534.51it/s
-        9 |     25 |  25000 |   25000 |  86.17% |  84.57% |  84.57% |       780s |   82.467s |   82.280s | 0.001737s | 0.185772s | 303.84it/s | 134573.88it/s
-       10 |     25 |  25000 |   25000 |  85.60% |  83.45% |  84.57% |       863s |   83.081s |   82.882s | 0.001656s | 0.197698s | 301.63it/s | 126455.38it/s
+        6 |     25 |  25000 |   25000 |  85.54% |  86.64% |  86.64% |       437s |   68.443s |   68.263s | 0.001680s | 0.178271s | 366.23it/s | 140235.89it/s
+        7 |     25 |  25000 |   25000 |  87.47% |  86.59% |  86.64% |       505s |   67.439s |   67.246s | 0.002223s | 0.183722s | 371.77it/s | 136075.02it/s
+        8 |     25 |  25000 |   25000 |  87.47% |  86.46% |  86.64% |       572s |   67.049s |   66.858s | 0.001797s | 0.189261s | 373.92it/s | 132092.73it/s
+        9 |     25 |  25000 |   25000 |  86.20% |  83.14% |  86.64% |       640s |   68.690s |   68.515s | 0.001689s | 0.173665s | 364.89it/s | 143955.12it/s
+       10 |     25 |  25000 |   25000 |  87.78% |  86.23% |  86.64% |       707s |   66.645s |   66.460s | 0.002032s | 0.183235s | 376.17it/s | 136436.62it/s
     epoch | epochs | sample | samples | train   | test    | best    | training   | epoch     | train     | compile   | test      | fit perf   | test perf
-       11 |     25 |  25000 |   25000 |  86.06% |  84.94% |  84.94% |       948s |   84.435s |   84.211s | 0.002026s | 0.222811s | 296.87it/s | 112202.59it/s
-       12 |     25 |  25000 |   25000 |  89.16% |  84.85% |  84.94% |      1025s |   76.931s |   76.703s | 0.003631s | 0.224351s | 325.93it/s | 111432.64it/s
-       13 |     25 |  25000 |   25000 |  87.25% |  85.16% |  85.16% |      1106s |   81.581s |   81.379s | 0.001598s | 0.200694s | 307.21it/s | 124567.63it/s
-       14 |     25 |  25000 |   25000 |  87.41% |  85.27% |  85.27% |      1188s |   82.326s |   82.127s | 0.001592s | 0.198122s | 304.41it/s | 126184.88it/s
-       15 |     25 |  25000 |   25000 |  87.42% |  84.18% |  85.27% |      1269s |   80.504s |   80.317s | 0.001646s | 0.184598s | 311.27it/s | 135429.77it/s
+       11 |     25 |  25000 |   25000 |  88.24% |  86.62% |  86.64% |       775s |   67.556s |   67.366s | 0.001815s | 0.187654s | 371.11it/s | 133224.19it/s
+       12 |     25 |  25000 |   25000 |  86.74% |  65.78% |  86.64% |       843s |   68.870s |   68.680s | 0.001766s | 0.188103s | 364.01it/s | 132905.64it/s
+       13 |     25 |  25000 |   25000 |  86.72% |  79.91% |  86.64% |       911s |   67.988s |   67.810s | 0.001868s | 0.176978s | 368.68it/s | 141260.70it/s
+       14 |     25 |  25000 |   25000 |  88.86% |  86.64% |  86.64% |       979s |   67.575s |   67.364s | 0.001785s | 0.208934s | 371.12it/s | 119655.30it/s
+       15 |     25 |  25000 |   25000 |  86.71% |  86.25% |  86.64% |      1051s |   71.594s |   71.390s | 0.001669s | 0.201951s | 350.19it/s | 123792.13it/s
     epoch | epochs | sample | samples | train   | test    | best    | training   | epoch     | train     | compile   | test      | fit perf   | test perf
-       16 |     25 |  25000 |   25000 |  89.57% |  85.62% |  85.62% |      1344s |   74.577s |   74.385s | 0.001814s | 0.189711s | 336.09it/s | 131779.28it/s
-       17 |     25 |  25000 |   25000 |  88.56% |  85.76% |  85.76% |      1420s |   76.918s |   76.721s | 0.002013s | 0.195322s | 325.86it/s | 127994.09it/s
-       18 |     25 |  25000 |   25000 |  87.92% |  85.04% |  85.76% |      1496s |   75.730s |   75.532s | 0.001638s | 0.196561s | 330.99it/s | 127187.03it/s
-       19 |     25 |  25000 |   25000 |  88.08% |  84.96% |  85.76% |      1572s |   75.887s |   75.674s | 0.001893s | 0.211503s | 330.37it/s | 118201.87it/s
-       20 |     25 |  25000 |   25000 |  88.36% |  85.47% |  85.76% |      1650s |   77.547s |   77.342s | 0.001579s | 0.203653s | 323.24it/s | 122757.73it/s
+       16 |     25 |  25000 |   25000 |  86.70% |  86.69% |  86.69% |      1121s |   70.615s |   70.385s | 0.003329s | 0.226804s | 355.19it/s | 110227.27it/s
+       17 |     25 |  25000 |   25000 |  87.30% |  86.16% |  86.69% |      1191s |   69.880s |   69.682s | 0.001767s | 0.195647s | 358.77it/s | 127781.47it/s
+       18 |     25 |  25000 |   25000 |  87.52% |  86.30% |  86.69% |      1263s |   72.019s |   71.746s | 0.001894s | 0.270618s | 348.45it/s | 92381.09it/s
+       19 |     25 |  25000 |   25000 |  87.19% |  83.23% |  86.69% |      1334s |   70.993s |   70.799s | 0.001731s | 0.191826s | 353.11it/s | 130326.16it/s
+       20 |     25 |  25000 |   25000 |  88.90% |  86.79% |  86.79% |      1403s |   69.191s |   68.962s | 0.002430s | 0.227169s | 362.52it/s | 110050.34it/s
     ```
 
 Repo will be active until I find a job or will lost hope in TM or figure out how to get money out of this thing. If you want to help - you are welcome, please fork and send PRs (or money). If you need help, feel free to open issue or contact me 😏.

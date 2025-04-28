@@ -207,6 +207,42 @@ pub fn getClauseU1(
     return 1;
 }
 
+pub fn getClauseVector(
+    config: Config,
+    comptime S: type,
+    states: *[]S,
+    features: BitVector,
+    i_polarity: usize,
+    i_clause: usize,
+) u1 {
+    const l = std.simd.suggestVectorLength(u8) orelse 1;
+    const Vec = @Vector(l, u8);
+
+    var c: u8 = 0xFF;
+    var i_feature: usize = 0;
+    while (c == 0xFF and i_feature + l * 8 < config.n_features) : (i_feature += l * 8) {
+        const literal_pos: Vec = @bitCast(features.bytes[i_feature/8 .. i_feature/8 + l][0..l].*);
+        const literal_neg: Vec = ~literal_pos;
+        const i_pos = config.stateIndex(i_polarity, i_clause, 0, i_feature);
+        const i_neg = config.stateIndex(i_polarity, i_clause, 1, i_feature);
+        const threshold: @Vector(l * 8, S) = @splat(0);
+        const includes_pos: Vec = @bitCast(states.*[i_pos .. i_pos + l * 8][0 .. l * 8].* >= threshold);
+        const includes_neg: Vec = @bitCast(states.*[i_neg .. i_neg + l * 8][0 .. l * 8].* >= threshold);
+        c &= @reduce(.And, (~includes_pos | literal_pos) & (~includes_neg | literal_neg));
+    }
+    while (c == 0xFF and i_feature < config.n_features) : (i_feature += 1) {
+        const feature_bit: u8 = if (features.getValue(i_feature)) 0xFF else 0;
+        const i_pos = config.stateIndex(i_polarity, i_clause, 0, i_feature);
+        const i_neg = config.stateIndex(i_polarity, i_clause, 1, i_feature);
+        const ip: u8 = if (states.*[i_pos] >= 0) 0xFF else 0;
+        const in: u8 = if (states.*[i_neg] >= 0) 0xFF else 0;
+        c &= ((~ip | feature_bit) & (~in | ~feature_bit));
+    }
+
+    const clause: u1 = @intFromBool(c == 0xFF);
+    return clause;
+}
+
 pub fn getClauseIncludesU1(
     config: Config,
     includes: BitVector,
@@ -229,11 +265,11 @@ pub fn getClauseIncludesU1(
 
 pub fn evaluateIncludesU1(
     config: Config,
-    comptime V: type,
+    comptime Votes: type,
     includes: BitVector,
     features: BitVector,
-) V {
-    var votes: V = 0;
+) Votes {
+    var votes: Votes = 0;
     for (0..2) |i_polarity| for (0..config.n_clauses) |i_clause| {
         const clause: u1 = getClauseIncludesU1(config, includes, features, i_polarity, i_clause);
         if (i_polarity == 0) votes += clause else votes -= clause;
@@ -290,12 +326,12 @@ test evaluateIncludesU1 {
 
 pub fn evaluateIncludesVector(
     config: Config,
-    comptime V: type,
+    comptime Votes: type,
     includes: BitVector,
     features: BitVector,
-) V {
-    if (@typeInfo(V).int.signedness != .signed) unreachable;
-    var votes: V = 0;
+) Votes {
+    if (@typeInfo(Votes).int.signedness != .signed) unreachable;
+    var votes: Votes = 0;
     const l = std.simd.suggestVectorLength(u8) orelse 1;
     const Vec = @Vector(l, u8);
 
@@ -321,7 +357,7 @@ pub fn evaluateIncludesVector(
                 c &= ((~ip | feature_bit) & (~in | ~feature_bit));
             }
 
-            const p: V = @intFromBool(c == 0xFF);
+            const p: Votes = @intFromBool(c == 0xFF);
             if (i_polarity == 0) votes += p else votes -= p;
         }
     }
@@ -334,8 +370,8 @@ pub const evaluateIncludes = evaluateIncludesVector;
 
 test "fuzz getIncludes() and evaluate()" {
     const allocator = std.testing.allocator;
-    const n_features = 256+4;
-    const n_clauses = 256+4;
+    const n_features = 512+4;
+    const n_clauses = 16+4;
     const config = Config.init(n_features, n_clauses);
     const S = i8;   // automata type
     const V = i32;  // vote‐count return type
@@ -371,19 +407,19 @@ test "fuzz getIncludes() and evaluate()" {
     defer features.deinit(allocator);
     @memset(features.bytes, 0);
 
-    for (0..1_000) |i| {
+    for (0..100) |i| {
         random.bytes(std.mem.sliceAsBytes(states_buf[0..(i % config.stateSize() + 1)]));
 
-        // getIncludesOnePass(S, states_buf, &includesOnePass);
-        // getIncludesTwoPass(S, states_buf, &includesTwoPass);
-        // getIncludesVector8(S, states_buf, &includesVector8);
-        // getIncludesVectorA(S, states_buf, &includesVectorA);
+        getIncludesOnePass(S, states_buf, &includesOnePass);
+        getIncludesTwoPass(S, states_buf, &includesTwoPass);
+        getIncludesVector8(S, states_buf, &includesVector8);
+        getIncludesVectorA(S, states_buf, &includesVectorA);
         getIncludesVectorB(S, states_buf, &includesVectorB);
 
-        // try testing.expectEqualSlices(u8, includesOnePass.bytes, includesTwoPass.bytes);
-        // try testing.expectEqualSlices(u8, includesOnePass.bytes, includesVector8.bytes);
-        // try testing.expectEqualSlices(u8, includesOnePass.bytes, includesVectorA.bytes);
-        // try testing.expectEqualSlices(u8, includesOnePass.bytes, includesVectorB.bytes);
+        try testing.expectEqualSlices(u8, includesOnePass.bytes, includesTwoPass.bytes);
+        try testing.expectEqualSlices(u8, includesOnePass.bytes, includesVector8.bytes);
+        try testing.expectEqualSlices(u8, includesOnePass.bytes, includesVectorA.bytes);
+        try testing.expectEqualSlices(u8, includesOnePass.bytes, includesVectorB.bytes);
 
         const includes = includesVectorB;
         const v1 = evaluateIncludesU1(config, V, includes, features);
@@ -411,8 +447,30 @@ inline fn randomUniform(
 ) T {
     return switch (@typeInfo(T)) {
         .float => random.float(T),
-        else => random.int(T),
+        .int => random.int(T),
+        .bool => random.boolean(),
+        else => unreachable,
     };
+}
+
+pub fn evaluateVector(
+    config: Config,
+    comptime Votes: type,
+    comptime S: type,
+    states: []S,
+    features: BitVector,
+) Votes {
+    if (@typeInfo(Votes).int.signedness != .signed) unreachable;
+    var votes: Votes = 0;
+
+    for (0..2) |i_polarity| {
+        for (0..config.n_clauses) |i_clause| {
+            const clause: u1 = getClauseVector(config, S, states, features, i_polarity, i_clause);
+            if (i_polarity == 0) votes += clause else votes -= clause;
+        }
+    }
+
+    return votes;
 }
 
 
@@ -422,40 +480,45 @@ pub fn fit(
     states: *[]S,
     features: BitVector,
     target: bool,
-    comptime V: type,
-    t: V, // non-negative
-    comptime F: type,
-    comptime R: type,
-    r: R,
-    maybe_random: ?std.Random,
-    comptime use_type_1a_feedback: bool,
-    comptime use_type_1b_feedback: bool,
-    comptime use_type_2_feedback: bool,
-) i64 {
-    _ = .{use_type_1a_feedback, use_type_1b_feedback, use_type_2_feedback};
-    var votes: V = 0;
-    for (0..2) |i_polarity| for (0..config.n_clauses) |i_clause| {
-        const clause: u1 = getClauseU1(config, S, states, features, i_polarity, i_clause);
-        if (i_polarity == 0) votes += clause else votes -= clause;
-    };
-
-    // Resource allocation...
-    // if (target == true and votes >= t or target == false and votes < -t) {
-    //     return votes;
-    // }
-    const p_clause_update: F = @as(F, @floatFromInt(@min(@max(if (target) -votes else votes, -t), t))) / (@as(F, @floatFromInt(2 * t))) + 0.5;
-
-    // if (maybe_random) |random| if (random.float(F) >= p_clause_update) {
-    //     return votes;
-    // };
-
-    for (0..2) |i_polarity| for (0..config.n_clauses) |i_clause| {
-        // Use resource allocation:
-        if (maybe_random) |random| if (random.float(F) >= p_clause_update) {
-            continue;
+    comptime Votes: type,
+    t: anytype, // resource allocation target, non-negative integer
+    r: anytype, // random feedback threshold for type 1B and type 2 feedback, float: [0, 1), unsigned int: [0, 2**bits)
+    random: std.Random,
+    comptime USE_RANDOM: bool,
+    comptime USE_OLD_RESOURCE_ALLOCATION: bool,
+    comptime USE_NEW_RESOURCE_ALLOCATION: bool,
+    comptime USE_TYPE_1A_FEEDBACK: bool,
+    comptime USE_TYPE_1B_FEEDBACK: bool,
+    comptime USE_TYPE_2_FEEDBACK: bool,
+) Votes {
+    var votes: Votes = 0;
+    const USE_RESOURCE_ALLOCATION = USE_NEW_RESOURCE_ALLOCATION or USE_OLD_RESOURCE_ALLOCATION;
+    if (USE_RESOURCE_ALLOCATION) {
+        for (0..2) |i_polarity| for (0..config.n_clauses) |i_clause| {
+            const clause: u1 = getClauseVector(config, S, states, features, i_polarity, i_clause);
+            if (i_polarity == 0) votes += clause else votes -= clause;
         };
+    }
+    if (USE_NEW_RESOURCE_ALLOCATION and (target == true and votes >= t or target == false and votes < -t)) {
+        return votes;
+    }
 
-        const clause: u1 = getClauseU1(config, S, states, features, i_polarity, i_clause);
+    const F = f32;
+    const p_clause_update: F = if (USE_OLD_RESOURCE_ALLOCATION)
+        @as(F, @floatFromInt(std.math.clamp(if (target) -votes else votes, -t, t))) / (@as(F, @floatFromInt(2 * t))) + 0.5
+    else
+        undefined;
+    // const p_clause_update: V = std.math.clamp(if (target) votes else -votes, -t, t) * @divTrunc(std.math.maxInt(V), 2 * t); // Tricky to implement integer version correctly...
+
+    for (0..2) |i_polarity| for (0..config.n_clauses) |i_clause| {
+        if (USE_RANDOM and USE_OLD_RESOURCE_ALLOCATION and randomUniform(random, @TypeOf(p_clause_update)) >= p_clause_update) {
+           continue;
+        }
+
+        const clause: u1 = getClauseVector(config, S, states, features, i_polarity, i_clause);
+        if (!USE_RESOURCE_ALLOCATION) {
+            if (i_polarity == 0) votes += clause else votes -= clause;
+        }
 
         for (0..2) |i_negated| for (0..config.n_features) |i_feature| {
             var literal: u1 = @intFromBool(features.getValue(i_feature));
@@ -463,17 +526,73 @@ pub fn fit(
 
             const i_state = config.stateIndex(i_polarity, i_clause, i_negated, i_feature);
             if (@intFromBool(target) != i_polarity) {
-                states.*[i_state] +|= @intFromBool(use_type_1a_feedback and (clause & literal) == 1);
-                states.*[i_state] -|= @intFromBool(use_type_1b_feedback and (clause & literal) == 0 and (if (maybe_random) |random| randomUniform(random, R) >= r else true));
+                states.*[i_state] +|= @intFromBool(USE_TYPE_1A_FEEDBACK and (clause & literal) == 1);
+                states.*[i_state] -|= @intFromBool(USE_TYPE_1B_FEEDBACK and (clause & literal) == 0 and (!USE_RANDOM or randomUniform(random, @TypeOf(r)) >= r));
             } else {
                 const excluded = states.*[i_state] < 0;
-                states.*[i_state] +|= @intFromBool(use_type_2_feedback and (clause == 1) and (literal == 0) and excluded and (if (maybe_random) |random| randomUniform(random, R) < r else true));
+                states.*[i_state] +|= @intFromBool(USE_TYPE_2_FEEDBACK and (clause == 1) and (literal == 0) and excluded and (!USE_RANDOM or randomUniform(random, @TypeOf(r)) < r));
             }
         };
     };
 
     return votes;
 }
+
+// test "p_clause_update" {
+//     const V = i8;
+//     const target: bool = true;
+//     const t: V = 4;
+//     std.debug.assert(t >= 0);
+//     for (0..12) |i| {
+//         const votes: V = @as(V, @intCast(i)) - 6;
+//         // const p: V = std.math.clamp(if (target) votes else -votes, -t, t) * @divTrunc(1 << @typeInfo(V).int.bits, 2 * t);
+//         const p: V = std.math.clamp(if (target) votes else -votes, -t, t) * @divTrunc(std.math.maxInt(V) - std.math.minInt(V), 2 * t);
+//         std.debug.print("votes: {}, p: {}\n", .{votes, p});
+//     }
+// }
+
+// test "p_clause_update_wrapping" {
+//     const V = i8;
+//     const target: bool = true;
+//     const t: V = 4;
+//     std.debug.assert(t > 0); // Must be positive for the division
+//
+//     const V_bits = @typeInfo(V).int.bits;
+//
+//     // Calculate scale factor. We might need a slightly wider type for the
+//     // intermediate division calculation itself, but the resulting 'scale'
+//     // must fit within V for the subsequent multiplication.
+//     const scale_intermediate: i16 = @divTrunc(1 << V_bits, 2 * @as(i16, t)); // 256 / 8 = 32
+//     const scale: V = @as(V, @intCast(scale_intermediate));
+//     // Assert that the scale factor fits in V, otherwise this technique fails.
+//     // std.debug.assert(scale_intermediate >= std.math.minInt(V) and scale_intermediate <= std.math.maxInt(V));
+//     // std.debug.assert(scale == 32); // Check for our specific case
+//
+//     // for (0..12) |i| {
+//     //     const votes: V = @as(V, @intCast(i)) - 6;
+//
+//     for (0..1 << V_bits) |i| {
+//         const votes: V = @as(V, @truncate(i)) - (1 << (V_bits - 2));
+//
+//         // 1. Clamp input to [-t, t]
+//         const clamped_value: V = std.math.clamp(if (target) votes else -votes, -t, t);
+//
+//         // 2. Perform multiplication using wrapping arithmetic (`*%`).
+//         // For clamped_value = 4, this calculates 4 *% 32 = -128 (due to i8 wrapping)
+//         const scaled_val: V = clamped_value *% scale;
+//
+//         // 3. Determine if the input was exactly the maximum `t`.
+//         // `@boolToInt` converts true to 1, false to 0. Result fits V.
+//         // const is_t: V = @intFromBool(clamped_value == t);
+//
+//         // 4. Subtract `is_t` using wrapping arithmetic (`-%`).
+//         // If clamped_value == t (is_t = 1): p = scaled_val -% 1 = -128 -% 1 = 127
+//         // If clamped_value != t (is_t = 0): p = scaled_val -% 0 = scaled_val
+//         const p: V = scaled_val ;
+//
+//         std.debug.print("votes: {}, p: {}\n", .{votes, p});
+//     }
+// }
 
 test fit {
     const allocator = std.testing.allocator;
@@ -507,7 +626,7 @@ test fit {
         for (0..test_states.len) |i| {
             states[i] = test_states[i];
         }
-        _ = fit(config, S, &states, features, true, i32, 8, f32, f32, 0.75, null, true, false, false);
+        _ = fit(config, S, &states, features, true, i32, 8, 0.75, std.crypto.random, false, false, false, true, false, false);
         const expected = [_]S{
             1,  1,
             2, -1,
@@ -518,13 +637,13 @@ test fit {
            -1,  1,
            -1, -1,
         };
-        std.debug.print(
-            \\type 1a feedback
-            \\original: {d}
-            \\     got: {d}
-            \\expected: {d}
-            \\
-        , .{test_states, states, expected});
+        // std.debug.print(
+        //     \\type 1a feedback
+        //     \\original: {d}
+        //     \\     got: {d}
+        //     \\expected: {d}
+        //     \\
+        // , .{test_states, states, expected});
         for (0..states.len) |i| {
             try testing.expectEqual(expected[i], states[i]);
         }
@@ -537,7 +656,7 @@ test fit {
         for (0..test_states.len) |i| {
             states[i] = test_states[i];
         }
-        _ = fit(config, S, &states, features, true, i32, 8, f32, f32, 0.75, null, false, true, false);
+        _ = fit(config, S, &states, features, true, i32, 8, 0.75, std.crypto.random, false, false, false, false, true, false);
         const expected = [_]S{
             0,  0,
             1, -2,
@@ -549,13 +668,13 @@ test fit {
            -1, -1,
         };
         // std.debug.print("expected: {d}\ngot: {d}\n", .{expected, states});
-        std.debug.print(
-            \\type 1b feedback
-            \\original: {d}
-            \\     got: {d}
-            \\expected: {d}
-            \\
-        , .{test_states, states, expected});
+        // std.debug.print(
+        //     \\type 1b feedback
+        //     \\original: {d}
+        //     \\     got: {d}
+        //     \\expected: {d}
+        //     \\
+        // , .{test_states, states, expected});
         for (0..states.len) |i| {
             try testing.expectEqual(expected[i], states[i]);
         }
@@ -568,7 +687,7 @@ test fit {
         for (0..test_states.len) |i| {
             states[i] = test_states[i];
         }
-        _ = fit(config, S, &states, features, true, i32, 8, f32, f32, 0.75, null, false, false, true);
+        _ = fit(config, S, &states, features, true, i32, 8, 0.75, std.crypto.random, false, false, false, false, false, true);
         const expected = [_]S{
             1,  1,
             1, -1,
@@ -579,13 +698,13 @@ test fit {
            -1,  1,
            -1,  0,
         };
-        std.debug.print(
-            \\type 2 feedback
-            \\original: {d}
-            \\     got: {d}
-            \\expected: {d}
-            \\
-        , .{test_states, states, expected});
+        // std.debug.print(
+        //     \\type 2 feedback
+        //     \\original: {d}
+        //     \\     got: {d}
+        //     \\expected: {d}
+        //     \\
+        // , .{test_states, states, expected});
         for (0..states.len) |i| {
             try testing.expectEqual(expected[i], states[i]);
         }
@@ -594,3 +713,29 @@ test fit {
 
 const std = @import("std");
 const testing = std.testing;
+
+// (np.where(target, votes, -votes).clip(-t, t) + t) * (scale // (2 * t))
+// test "helpme" {
+//     const Prob = u64; // any unsigned integer type
+//     const r_scale: comptime_int = 1 << @typeInfo(Prob).int.bits;
+//     const target: bool = true;
+//     const Votes = i32; // any signed integer type
+//     const votes: Votes = 10;
+//     const t: Votes = 16; // any small non-negative number
+//     const p_clause_update: Prob = (@min(@max(if (target) -votes else votes, -t), t)) * @divTrunc(r_scale, (2 * t));
+//
+//     _ = p_clause_update;
+// }
+
+// test "helpme_fixed_concise" {
+//     const target: bool = true;
+//     const Votes = i32; // any signed integer type
+//     // const r_scale: comptime_int = 1 << @typeInfo(Votes).int.bits - 1;
+//     const r_scale = std.math.maxInt(Votes);
+//     const votes: Votes = 10;
+//     const t: Votes = 16; // any small non-negative number
+//
+//     const p_clause_update = (@abs(std.math.clamp(if (target) votes else -votes, -t, t) + t)) * @abs(@divTrunc(r_scale, (2 * t)));
+//
+//     _ = p_clause_update; // Используем результат, чтобы компилятор не ругался
+// }

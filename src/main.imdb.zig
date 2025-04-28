@@ -136,10 +136,12 @@ pub fn main() !void {
     const r_int: RInt = @intFromFloat(r_float * r_scale);
     // const r = r_float;
     const r = r_int;
-    const n_epochs: usize = 1000;
+    const n_epochs: usize = 25;
     std.debug.print("S: {}, t: {d}, r: {d} ({d}), n_features: {d}, n_clauses: {d}, state size: {d} ({d:.1})\n", .{S, t, r, r_float, n_features, n_clauses, config.stateSize(), std.fmt.fmtIntSizeBin(config.stateSize() * @sizeOf(S))});
 
-    var prng = std.Random.DefaultPrng.init(std.crypto.random.int(u64));
+    // const seed = std.crypto.random.int(u64);
+    const seed = 11111111;
+    var prng = std.Random.DefaultPrng.init(seed);
     const random = prng.random();
     // const random = std.crypto.random;
     _ = .{random};
@@ -156,6 +158,7 @@ pub fn main() !void {
 
     var best_test_accuracy: F = 0.0;
     var training_timer = try std.time.Timer.start();
+    // const test_every_n_samples = 1;
     const test_every_n_samples = 50000;
 
     for (0..n_epochs) |i_epoch| {
@@ -188,7 +191,7 @@ pub fn main() !void {
                 var test_timer = try std.time.Timer.start();
 
                 const n_test_samples = test_bytes.len / example_size_bytes;
-                // const n_test_samples = test_bytes.len / example_size_bytes / 10000;
+
                 for (0..n_test_samples) |i_test_sample| {
                     const test_offset = i_test_sample * example_size_bytes;
                     const test_example_data = test_bytes[test_offset .. test_offset + example_size_bytes];
@@ -196,7 +199,8 @@ pub fn main() !void {
                     const test_label = if (test_example_data[example_size_bytes - 1] == 0) false else true;
 
                     // const test_features = root.BitVector.from(n_features, @constCast(@ptrCast(test_features_slice)));
-                    // const test_pred = root.evaluateIncludes(config, V, includes, test_features) >= 0;
+                    // // const test_pred = root.evaluateIncludesU1(config, V, includes, test_features) >= 0;
+                    // const test_pred = root.evaluateIncludesVector(config, V, includes, test_features) >= 0;
                     // const test_error = test_pred != test_label;
                     // test_errors += @intFromBool(test_error);
 
@@ -204,8 +208,13 @@ pub fn main() !void {
                         struct {
                             fn run(data: []u8, lbl: bool, cfg: root.Config, inc: *root.BitVector, err_cnt: *std.atomic.Value(usize)) void {
                                 const features = root.BitVector.from(n_features, @constCast(@ptrCast(data)));
-                                const pred = root.evaluateIncludes(cfg, V, inc.*, features) >= 0;
-                                if (pred != lbl) {
+                                const votes = root.evaluateIncludes(cfg, V, inc.*, features);
+                                // const votes = root.evaluateIncludesU1(cfg, V, inc.*, features);
+                                // const votes2 = root.evaluateIncludesVector(cfg, V, inc.*, features);
+                                // if (votes != votes2) {
+                                //     std.debug.print("votes: {d}, votes2: {d}\n", .{votes, votes2});
+                                // }
+                                if ((votes >= 0) != lbl) {
                                     _ = err_cnt.fetchAdd(1, .monotonic);
                                 }
                             }
@@ -250,7 +259,7 @@ pub fn main() !void {
             // const train_features = root.BitVector.from(n_features, @constCast(@ptrCast(train_features_slice)));
             const train_label = if (train_example_data[example_size_bytes - 1] == 0) false else true;
 
-            // const train_vote = root.fit(config, S, &states, &includes, train_features, train_label, V, t, F, @TypeOf(r), r, random, true, true, true);
+            // const train_vote = root.fit(config, S, &states, train_features_slice, train_label, V, t, r, random, true, false, true, true, true, true);
             // const train_pred = train_vote >= 0;
             // const train_error = train_pred != train_label;
             // epoch_error += @intFromBool(train_error);
@@ -260,7 +269,7 @@ pub fn main() !void {
                         var prng__ = prng_;
                         const random_ = prng__.random();
                         const features = root.BitVector.from(n_features, @constCast(@ptrCast(data)));
-                        const vote = root.fit(config_, S, states_, features, lbl, V, t, F, @TypeOf(r), r, random_, true, true, true);
+                        const vote = root.fit(config_, S, states_, features, lbl, V, t, r, random_, true, false, true, true, true, true);
                         const pred = vote >= 0;
                         if (pred != lbl) {
                             _ = err_cnt.fetchAdd(1, .monotonic);
