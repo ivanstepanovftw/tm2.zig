@@ -357,8 +357,9 @@ pub fn evaluateIncludesVector(
                 c &= ((~ip | feature_bit) & (~in | ~feature_bit));
             }
 
-            const p: Votes = @intFromBool(c == 0xFF);
-            if (i_polarity == 0) votes += p else votes -= p;
+            if (c == 0xFF) {
+                if (i_polarity == 0) votes += 1 else votes -= 1;
+            }
         }
     }
 
@@ -466,7 +467,9 @@ pub fn evaluateVector(
     for (0..2) |i_polarity| {
         for (0..config.n_clauses) |i_clause| {
             const clause: u1 = getClauseVector(config, S, states, features, i_polarity, i_clause);
-            if (i_polarity == 0) votes += clause else votes -= clause;
+            if (clause == 1) {
+                if (i_polarity == 0) votes += 1 else votes -= 1;
+            }
         }
     }
 
@@ -496,7 +499,9 @@ pub fn fitU1(
     if (USE_RESOURCE_ALLOCATION) {
         for (0..2) |i_polarity| for (0..config.n_clauses) |i_clause| {
             const clause: u1 = getClauseVector(config, S, states, features, i_polarity, i_clause);
-            if (i_polarity == 0) votes += clause else votes -= clause;
+            if (clause == 1) {
+                if (i_polarity == 0) votes += 1 else votes -= 1;
+            }
         };
     }
     if (USE_NEW_RESOURCE_ALLOCATION and (target == true and votes >= t or target == false and votes < -t)) {
@@ -516,25 +521,27 @@ pub fn fitU1(
         }
 
         const clause: u1 = getClauseVector(config, S, states, features, i_polarity, i_clause);
-        if (!USE_RESOURCE_ALLOCATION) {
-            if (i_polarity == 0) votes += clause else votes -= clause;
+        if (!USE_RESOURCE_ALLOCATION and clause == 1) {
+            if (i_polarity == 0) votes += 1 else votes -= 1;
         }
 
         for (0..2) |i_negated| for (0..config.n_features) |i_feature| {
-            var literal: u1 = @intFromBool(features.getValue(i_feature));
-            literal = if (i_negated == 0) literal else ~literal;
+            const feature = features.getValue(i_feature);
+            const literal: u1 = @intFromBool(if (i_negated == 0) feature else !feature);
 
             const i_state = config.stateIndex(i_polarity, i_clause, i_negated, i_feature);
+            var s = states.*[i_state];
             if (@intFromBool(target) != i_polarity) {
                 if (USE_TYPE_1A_FEEDBACK and (clause & literal) == 1)
-                    states.*[i_state] +|= 1;
+                    s +|= 1;
                 if (USE_TYPE_1B_FEEDBACK and (clause & literal) == 0 and (!USE_RANDOM or randomUniform(random, @TypeOf(r)) >= r))
-                    states.*[i_state] -|= 1;
+                    s -|= 1;
             } else {
-                const excluded = states.*[i_state] < 0;
+                const excluded = s < 0;
                 if (USE_TYPE_2_FEEDBACK and (clause == 1) and (literal == 0) and excluded and (!USE_RANDOM or randomUniform(random, @TypeOf(r)) < r))
-                    states.*[i_state] +|= 1;
+                    s +|= 1;
             }
+            states.*[i_state] = s;
         };
     };
 
