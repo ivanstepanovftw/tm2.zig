@@ -474,7 +474,7 @@ pub fn evaluateVector(
 }
 
 
-pub fn fit(
+pub fn fitU1(
     config: Config,
     comptime S: type,
     states: *[]S,
@@ -512,7 +512,7 @@ pub fn fit(
 
     for (0..2) |i_polarity| for (0..config.n_clauses) |i_clause| {
         if (USE_RANDOM and USE_OLD_RESOURCE_ALLOCATION and randomUniform(random, @TypeOf(p_clause_update)) >= p_clause_update) {
-           continue;
+            continue;
         }
 
         const clause: u1 = getClauseVector(config, S, states, features, i_polarity, i_clause);
@@ -526,17 +526,22 @@ pub fn fit(
 
             const i_state = config.stateIndex(i_polarity, i_clause, i_negated, i_feature);
             if (@intFromBool(target) != i_polarity) {
-                states.*[i_state] +|= @intFromBool(USE_TYPE_1A_FEEDBACK and (clause & literal) == 1);
-                states.*[i_state] -|= @intFromBool(USE_TYPE_1B_FEEDBACK and (clause & literal) == 0 and (!USE_RANDOM or randomUniform(random, @TypeOf(r)) >= r));
+                if (USE_TYPE_1A_FEEDBACK and (clause & literal) == 1)
+                    states.*[i_state] +|= 1;
+                if (USE_TYPE_1B_FEEDBACK and (clause & literal) == 0 and (!USE_RANDOM or randomUniform(random, @TypeOf(r)) >= r))
+                    states.*[i_state] -|= 1;
             } else {
                 const excluded = states.*[i_state] < 0;
-                states.*[i_state] +|= @intFromBool(USE_TYPE_2_FEEDBACK and (clause == 1) and (literal == 0) and excluded and (!USE_RANDOM or randomUniform(random, @TypeOf(r)) < r));
+                if (USE_TYPE_2_FEEDBACK and (clause == 1) and (literal == 0) and excluded and (!USE_RANDOM or randomUniform(random, @TypeOf(r)) < r))
+                    states.*[i_state] +|= 1;
             }
         };
     };
 
     return votes;
 }
+
+pub const fit = fitU1;
 
 // test "p_clause_update" {
 //     const V = i8;
