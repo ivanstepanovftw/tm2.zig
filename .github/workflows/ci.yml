@@ -1,0 +1,29 @@
+name: Build and test the library
+
+on:
+  push:
+    branches: ["main", "ci"]
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        zig: [0.14.0, master]
+#        os: [ubuntu-latest]
+#        zig: [0.14.0]
+    runs-on: ${{matrix.os}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{matrix.zig}}
+      - run: zig build test
+# TODO:
+#  lint:
+#    runs-on: ubuntu-latest
+#    steps:
+#      - uses: actions/checkout@v2
+#      - uses: goto-bus-stop/setup-zig@v2
+#      - run: zig fmt --check .
+
