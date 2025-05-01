@@ -1,8 +1,77 @@
 # tm2.zig
-Binary Tsetlin machine implementation in Zig. Currently, very slow training, fast inference performance. Covered by tests. CPU only, yet.
+Binary Tsetlin machine library, a machine learning model, written in Zig. Currently, slow training, fast inference performance. Covered by tests. CPU only, yet.
+
+
+```mermaid
+flowchart TD
+    %% Блоки входных данных и обработки
+    x["Input 'x': n bits\n---\nРезультат: x₁ x₂ ... xₙ"]
+    nx["Отрицание входов 'nx': n bits\n---\nРезультат: nx₁ nx₂ ... nxₙ"]
+    l["Литералы 'l': 2n bits\n---\nРезультат: l₁ l₂ ... l₂ₙ"]
+    
+    %% Блоки автоматов и маски
+    a["Автоматы 'a': 2m × 2n signed integers\n---\nРезультат:\ne₁,₁  e₁,₂  ...  e₁,₂ₙ\ne₂,₁  e₂,₂  ...  e₂,₂ₙ\n...   ...   ...  ...\neₘ,₁  eₘ,₂  ...  eₘ,₂ₙ\neₘ₊₁,₁ eₘ₊₁,₂ ... eₘ₊₁,₂ₙ\neₘ₊₂,₁ eₘ₊₂,₂ ... eₘ₊₂,₂ₙ\n...    ...   ...  ...\ne₂ₘ,₁  e₂ₘ,₂  ...  e₂ₘ,₂ₙ"]
+    
+    e["Маска исключения 'e': 2m × 2n bits\n---\nРезультат:\ne₁,₁  e₁,₂  ...  e₁,₂ₙ\ne₂,₁  e₂,₂  ...  e₂,₂ₙ\n...   ...   ...  ...\neₘ,₁  eₘ,₂  ...  eₘ,₂ₙ\neₘ₊₁,₁ eₘ₊₁,₂ ... eₘ₊₁,₂ₙ\neₘ₊₂,₁ eₘ₊₂,₂ ... eₘ₊₂,₂ₙ\n...    ...   ...  ...\ne₂ₘ,₁  e₂ₘ,₂  ...  e₂ₘ,₂ₙ"]
+    
+    %% Блоки голосования и результатов
+    t["Голоса команды 't': 2m bits\n---\nРезультат:\nt₁ t₂ ... tₘ tₘ₊₁ tₘ₊₂ ... t₂ₘ"]
+    
+    pt["Суммирование голосов\n---\nРезультат:\npt (позитивные)\nnt (негативные)"]
+    
+    v["Финальное голосование 'v'\n---\nРезультат: v"]
+    
+    y["Предсказание 'y_pred'\n---\nРезультат: y_pred"]
+    
+    %% Связи между блоками с формулами на стрелках
+    x -- "nx_i = ~x_i" --> nx
+    x -- "x_i" --> l
+    nx -- "nx_i" --> l
+    l -- "l = stack(x, nx)" --> t
+    
+    a -- "e_j,i = a_j,i < 0" --> e
+    e -- "e_j,i" --> t
+    
+    t -- "t_j = and(e_j,i ∨ l_i)\n(e₁,₁ ∧ l₁) ∨ (e₁,₂ ∧ l₂) ∨ ... ∨ (e₁,₂ₙ ∧ l₂ₙ)\n..." --> pt
+    pt -- "pt = sum(t_1..t_m)\nnt = sum(t_m+1..t_2m)" --> v
+    v -- "v = pt - nt" --> y
+    y -- "y_pred = v >= 0" --> y_pred["Финальное предсказание"]
+    
+    %% Стилизация
+    classDef input fill:#d4ffd4,stroke:#333,stroke-width:1px
+    classDef negate fill:#ffd4ff,stroke:#333,stroke-width:1px
+    classDef literals fill:#d4d4d4,stroke:#333,stroke-width:1px
+    classDef automata fill:#ffd4d4,stroke:#333,stroke-width:1px
+    classDef exclusion fill:#d4d4ff,stroke:#333,stroke-width:1px
+    classDef team fill:#d4d4d4,stroke:#333,stroke-width:1px
+    classDef votes fill:#d4d4d4,stroke:#333,stroke-width:1px
+    classDef prediction fill:#d4d4d4,stroke:#333,stroke-width:1px
+    
+    class x input
+    class nx negate
+    class l literals
+    class a automata
+    class e exclusion
+    class t team
+    class pt,v votes
+    class y,y_pred prediction
+```
 
 ## Tsetlin machine
-In short, Tsetlin machine is a type of machine learning model. It is energy efficient, does not use floating point computations, bitwise, losslessly quantizable down to 1 bit per weight, lossy compressible up to how many important clauses you want to keep, weights are interpretable (if your inputs are interpretable), it does not overfit on small dataset, it does not require your task to be differentiable, have linear time complexity... God knows what else can it do.
+In short, Tsetlin machine is a type of machine learning model.
+
+It differs from traditional neural networks and deep learning in that it uses a set of rules to make decisions, rather than relying on complex mathematical functions.
+
+- **low on hyperparameters** - it has only a few hyperparameters mostly for regularization, and you can even omit them or use defaults
+- **highly non-linear** - it can learn non-linear patterns without multiple layers
+- **weights are interpretable** - if your inputs are interpretable, you can see the logic behind patterns it learned
+- **energy efficient** - it does not use floating point computations, it uses bitwise operations and saturating arithmetic, training and inference max time complexity is linear
+- **memory efficient** - you do not need to keep inputs for each layer to do backpropagation, you do not need complex optimization algorithms 
+- **gradient-free** - your task does not need to be differentiable
+- **zero initialization scheme** - it does not require random initialization of weights
+- **native 1 bit quantization** - losslessly quantizable down to 1 bit per weight
+- **easy pruning** - why transfer learning when you can just prune the model?
+- **mature regularization** - no dropout, no L1/L2 regularization, no batch normalization, no data augmentation, no early stopping, no weight decay, no learning rate decay, no momentum, no nothing - just wise skipping of updates
 
 ## This work
 This implementation uses different probabilities in Type I(a), Type I(b) and Type II feedbacks, same as in [Julia multi-class TM implementation](https://github.com/BooBSD/Tsetlin.jl).
